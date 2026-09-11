@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node src/index.js",
     "test": "node --test test/bot.test.js",
-    "test:integration": "node test/integration.mjs"
+    "test:integration": "node test/integration.mjs",
+    "test:watcher": "node test/watcher-integration.mjs"
   },
   "dependencies": {
     "ethers": "^6.13.4"

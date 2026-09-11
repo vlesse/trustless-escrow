@@ -3,6 +3,7 @@ import { updates, sendMessage, answerCallback, setMyCommands, getMe, esc } from 
 import * as session from "./session.js";
 import { scanForSecrets, secretWarning } from "./secrets.js";
 import * as cmd from "./commands.js";
+import { start as startWatcher } from "./watcher.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
 /// 用户可能在任意一条消息里粘贴私钥或助记词。
@@ -101,6 +102,11 @@ async function main() {
     { command: "cancel", description: "退出当前流程" },
     { command: "help", description: "使用说明" },
   ]);
+
+  // 事件推送与消息处理互不阻塞：监听出问题不应当让机器人整个失灵
+  startWatcher((chatId, text) => sendMessage(chatId, text)).catch((e) =>
+    log(`事件监听启动失败（机器人其余功能不受影响）: ${e.message}`)
+  );
 
   log("开始接收消息");
   for await (const u of updates()) {

@@ -321,3 +321,102 @@ describe("MarkdownV2 转义", () => {
     assert.equal(esc("a\\b"), "a\\\\b");
   });
 });
+
+// ====================================================== 事件通知
+
+const { describeEvent, describeDeadline } = await import("../src/watcher.js");
+
+/// MarkdownV2 校验：正文里除了作为语法的 * 和 `，其余特殊字符都必须转义。
+/// 漏一个 Telegram 会直接拒收整条消息 —— 不是显示错乱，是用户什么都收不到。
+function assertValidMarkdownV2(text, label) {
+  let inCode = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") { i++; continue; }      // 已转义，跳过下一个字符
+    if (c === "`") { inCode = !inCode; continue; }
+    if (inCode) continue;                    // 代码块内十六进制地址天然安全
+    if (c === "*") continue;                 // 有意的加粗标记
+    if ("_[]()~>#+-=|{}.!".includes(c)) {
+      assert.fail(
+        `${label}: 第 ${i} 位的 "${c}" 未转义，Telegram 会拒收整条消息\n  …${text.slice(Math.max(0, i - 30), i + 30)}…`
+      );
+    }
+  }
+  assert.equal(inCode, false, `${label}: 代码块未闭合`);
+}
+
+describe("事件通知", () => {
+  const deal = {
+    address: "0x24B3c7704709ed1491473F30393FFc93cFB0FC34",
+    buyer: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    seller: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+    buyerFunded: true, sellerFunded: true,
+    deliveryDeadline: 2_000_000_000, inspectionDeadline: 2_000_100_000,
+  };
+  const info = { decimals: 6, symbol: "USDT", address: deal.buyer };
+
+  const CASES = [
+    ["Deposited", { party: deal.buyer, amount: 2_000_000_000n }],
+    ["Activated", { deliveryDeadline: 2_000_000_000n, lockedArbCost: 100_000_000n }],
+    ["DeliveryMarked", { seller: deal.seller, evidenceURI: "ipfs://x", inspectionDeadline: 2_000_100_000n }],
+    ["DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "ipfs://y" }],
+    ["Ruled", { disputeID: 1n, ruling: 0n }],
+    ["Ruled", { disputeID: 1n, ruling: 1n }],
+    ["Settled", { finalState: 5n, toBuyer: 0n, toSeller: 2_995_000_000n, toArbitrator: 0n, fee: 5_000_000n }],
+  ];
+
+  for (const [name, args] of CASES) {
+    test(`${name} 生成的消息是合法 MarkdownV2`, () => {
+      const msgs = describeEvent(name, args, deal, info);
+      assert.ok(msgs.length > 0, "应当产生至少一条通知");
+      for (const m of msgs) assertValidMarkdownV2(m.text, `${name}/${m.to}`);
+    });
+  }
+
+  test("到期提醒的两种文案都是合法 MarkdownV2", () => {
+    for (const kind of ["delivery", "inspection"]) {
+      for (const remaining of [86_400, 21_600, 3_600, 90_000]) {
+        const m = describeDeadline(deal, kind, remaining);
+        assertValidMarkdownV2(m.text, `${kind}/${remaining}`);
+      }
+    }
+  });
+
+  test("通知只发给需要知道的那一方", () => {
+    // 买家入金 → 只通知卖家，不给买家发「你自己入金了」
+    const dep = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, deal, info);
+    assert.deepEqual(dep.map((m) => m.to), ["seller"]);
+
+    // 卖家标记交付 → 只通知买家（要开始验收的是他）
+    const dm = describeEvent("DeliveryMarked",
+      { seller: deal.seller, evidenceURI: "", inspectionDeadline: 2_000_100_000n }, deal, info);
+    assert.deepEqual(dm.map((m) => m.to), ["buyer"]);
+
+    // 买家提争议 → 只通知卖家
+    const dr = describeEvent("DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "" }, deal, info);
+    assert.deepEqual(dr.map((m) => m.to), ["seller"]);
+  });
+
+  test("到期提醒只发给「不作为会吃亏」的那一方", () => {
+    // 交付期：卖家不动作会被买家取回全款
+    assert.equal(describeDeadline(deal, "delivery", 3600).to, "seller");
+    // 验收期：买家不动作货款自动放给卖家
+    assert.equal(describeDeadline(deal, "inspection", 3600).to, "buyer");
+  });
+
+  test("验收期提醒必须说清「逾期会自动放款」", () => {
+    const m = describeDeadline(deal, "inspection", 3600);
+    assert.match(m.text, /自动放给卖家/, "用户需要知道不作为的后果，否则提醒没有意义");
+    assert.match(m.text, /不可撤销/);
+  });
+
+  test("结算通知分别告知各方实收金额", () => {
+    const msgs = describeEvent("Settled",
+      { finalState: 5n, toBuyer: 1_000_000n, toSeller: 2_000_000n, toArbitrator: 0n, fee: 0n }, deal, info);
+    const buyer = msgs.find((m) => m.to === "buyer");
+    const seller = msgs.find((m) => m.to === "seller");
+    // 金额在消息里是 MarkdownV2 转义后的形式：1\.0 而非 1.0
+    assert.match(buyer.text, /1\\.0 USDT/);
+    assert.match(seller.text, /2\\.0 USDT/);
+  });
+});

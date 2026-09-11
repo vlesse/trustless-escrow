@@ -35,6 +35,13 @@ export const config = {
   /// 长轮询超时（秒）
   pollTimeoutSec: num("POLL_TIMEOUT_SEC", 30),
 
+  /// 链上事件的轮询间隔（毫秒）
+  watchIntervalMs: num("WATCH_INTERVAL_MS", 30_000),
+
+  /// 推送前等待的确认数。通知内容是「钱到账了」这类不可撤回的判断，
+  /// 重组后已推送的消息会变成假消息，而用户可能已经据此发了货。
+  confirmations: num("CONFIRMATIONS", 5),
+
   stateFile: process.env.STATE_FILE ?? "./.bot-state.json",
 };
 
