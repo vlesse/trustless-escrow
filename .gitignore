@@ -3,3 +3,4 @@ artifacts/
 cache/
 out/
 .env
+.localnet.json

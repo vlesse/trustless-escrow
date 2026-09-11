@@ -1,0 +1,20 @@
+{
+  "name": "@trustless-escrow/proposer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 提案人服务：监听争议、收集证据、出具默认裁决并质押提交",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "DRY_RUN=true node src/index.js",
+    "once": "node src/index.js --once",
+    "test": "node --test test/proposer.test.js",
+    "test:integration": "node test/integration.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
+    "ethers": "^6.13.4",
+    "zod": "^3.24.1"
+  }
+}
