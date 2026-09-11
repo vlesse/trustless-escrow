@@ -1,0 +1,3 @@
+ethers 6.17.0
+sha384-lApM4ELRuFNT7NgNqnXB2zFWgSDdhVvmnOHov2DPJz/2zuNpZImXBeklFr18ilvi
+来源: node_modules/ethers/dist/ethers.umd.min.js

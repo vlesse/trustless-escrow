@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>确认交易 · Trustless Escrow</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --text: #16181d;
+    --muted: #61656e;
+    --line: #e3e5ea;
+    --accent: #2f6feb;
+    --ok: #1a7f45;
+    --bad: #c0392b;
+    --warn-bg: #fff6e5;
+    --warn-line: #e8b53d;
+    --danger-bg: #fdeceb;
+    --danger-line: #d9534f;
+    --code-bg: #f0f1f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #181b21;
+      --text: #e8eaed;
+      --muted: #9aa0aa;
+      --line: #2a2e37;
+      --accent: #5b8dff;
+      --ok: #4ade80;
+      --bad: #f87171;
+      --warn-bg: #2a2314;
+      --warn-line: #a37b1e;
+      --danger-bg: #2b1717;
+      --danger-line: #b04844;
+      --code-bg: #12141a;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px 16px calc(32px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    max-width: 540px;
+    margin-inline: auto;
+  }
+
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 16px;
+    margin-bottom: 14px;
+  }
+  .card.risk-low { border-left: 4px solid var(--ok); }
+  .card.risk-medium { border-left: 4px solid var(--accent); }
+  .card.risk-high { border-left: 4px solid var(--warn-line); }
+  .card.risk-irreversible { border-left: 4px solid var(--danger-line); }
+
+  #action-title { font-size: 19px; font-weight: 650; margin: 0 0 8px; letter-spacing: -0.01em; }
+  #action-note { color: var(--muted); font-size: 14px; margin: 0; }
+
+  .amount {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line);
+  }
+  .amount .label { color: var(--muted); font-size: 13px; }
+  .amount .val { font-size: 22px; font-weight: 680; letter-spacing: -0.02em; }
+
+  .banner {
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 14px;
+  }
+  .banner.warn { background: var(--warn-bg); border: 1px solid var(--warn-line); }
+  .banner.danger { background: var(--danger-bg); border: 1px solid var(--danger-line); }
+  .banner b { display: block; margin-bottom: 4px; }
+
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+       color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+
+  ul#checks { list-style: none; margin: 0; padding: 0; }
+  ul#checks li {
+    display: flex; gap: 10px; align-items: flex-start;
+    padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px;
+  }
+  ul#checks li:last-child { border-bottom: 0; }
+  ul#checks .mark { flex: 0 0 18px; font-weight: 700; line-height: 1.5; }
+  ul#checks li.ok .mark { color: var(--ok); }
+  ul#checks li.bad .mark { color: var(--bad); }
+  ul#checks small { color: var(--muted); font-size: 12.5px; word-break: break-all; }
+
+  .kv { display: grid; grid-template-columns: 84px 1fr; gap: 8px 12px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; word-break: break-all; font-family: ui-monospace, SFMono-Regular,
+           Menlo, Consolas, monospace; font-size: 12px; }
+  #tx-data { display: block; background: var(--code-bg); padding: 8px; border-radius: 6px;
+             max-height: 140px; overflow: auto; }
+
+  button {
+    width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+    border: 0; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #fff; font-family: inherit;
+  }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.ghost {
+    background: transparent; color: var(--muted); border: 1px solid var(--line);
+    font-size: 13px; font-weight: 500; padding: 10px;
+  }
+  #sign { background: var(--ok); }
+
+  .connected { font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 10px; }
+  .connected b { font-family: ui-monospace, Menlo, Consolas, monospace;
+                 color: var(--text); word-break: break-all; }
+
+  #status { font-size: 13.5px; text-align: center; margin-top: 12px; color: var(--bad); min-height: 20px; }
+  #result { text-align: center; }
+  #txhash { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
+            word-break: break-all; color: var(--muted); display: block; margin: 8px 0; }
+  a { color: var(--accent); }
+
+  .foot { color: var(--muted); font-size: 12px; margin-top: 22px; line-height: 1.7; }
+  .foot code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <h1>正在核验交易…</h1>
+  <p class="sub">正在解读这笔交易的含义，并向链上确认目标合约的真伪。</p>
+</div>
+
+<div id="fatal" hidden>
+  <div class="banner danger">
+    <b>无法处理这个链接</b>
+    <span id="fatal-msg"></span>
+  </div>
+  <p class="foot">
+    如果你是从 Telegram 点进来的，请回到对话重新获取签名链接。
+    你也可以永远绕开本页面：机器人在每条操作消息里都附带了原始的合约地址与
+    <code>calldata</code>，任何钱包都能手工发起这笔交易。
+  </p>
+</div>
+
+<main id="main" hidden>
+  <h1>确认交易</h1>
+  <p class="sub">请核对下面的内容。签名在你自己的钱包里完成，本页面不接触你的私钥。</p>
+
+  <div id="irreversible" class="banner danger" hidden>
+    <b>此操作不可撤销</b>
+    一旦确认，资金将立即转移且无法追回。请确认你真的要这样做。
+  </div>
+
+  <div id="blocked" class="banner danger" hidden>
+    <b>已阻止签名</b>
+    下面的核验没有全部通过。这笔交易可能不是本协议发出的，也可能是伪造的链接。
+    在弄清楚原因之前，请不要用任何其它方式执行它。
+  </div>
+
+  <div id="action-card" class="card">
+    <p id="action-title"></p>
+    <p id="action-note"></p>
+    <div class="amount" id="amount-row" hidden>
+      <span class="label">涉及金额</span>
+      <span class="val" id="amount"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>安全核验</h2>
+    <ul id="checks"></ul>
+  </div>
+
+  <button id="toggle-raw" class="ghost">显示原始交易数据</button>
+
+  <div class="card" id="raw" hidden style="margin-top:14px">
+    <dl class="kv">
+      <dt>网络</dt><dd id="chain-name"></dd>
+      <dt>合约</dt><dd id="tx-to"></dd>
+      <dt>函数</dt><dd id="tx-sig"></dd>
+      <dt>附带</dt><dd id="tx-value"></dd>
+      <dt>calldata</dt><dd><code id="tx-data"></code></dd>
+    </dl>
+  </div>
+
+  <div style="margin-top:18px">
+    <div class="connected" id="connected" hidden>已连接 <b id="addr"></b></div>
+    <button id="connect">连接钱包</button>
+    <button id="sign" hidden>签名并发送</button>
+    <p id="status"></p>
+
+    <div id="result" class="card" hidden style="margin-top:14px">
+      <h2>已提交</h2>
+      <code id="txhash"></code>
+      <a id="txlink" href="#" target="_blank" rel="noopener noreferrer" hidden>在区块浏览器查看</a>
+      <p class="sub" id="result-note" style="margin:10px 0 0"></p>
+    </div>
+  </div>
+
+  <p class="foot">
+    交易内容通过 URL 的 <code>#</code> 片段传递，浏览器不会把它发送给服务器，
+    因此托管本页面的一方也无从知晓你在签什么。<br>
+    本页面是纯静态的，没有后端，依赖库已随页面一同分发而非从 CDN 加载。
+  </p>
+</main>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

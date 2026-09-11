@@ -158,6 +158,16 @@ FEE_BENEFICIARY=0x... PROPOSER=0x... SETTLEMENT_TOKEN=0x... FEE_BPS=50 \
 
 另外两处：钱包绑定要求签名证明控制权（挑战文本绑定 Telegram 用户 ID + 一次性 nonce，防冒用防重放）；主动检测用户粘贴的私钥与助记词并告警，该消息不进入任何存储，日志也永不打印消息内容。
 
+## 签名页
+
+[`services/signing-page/`](services/signing-page/) —— 纯静态、无后端、依赖 vendor 不走 CDN。
+
+它把机器人编码好的 calldata 翻译成人话（"确认收货并放款给卖家 · 不可撤销"），并在链上独立验证目标确实是工厂登记的托管合约。**解不出来或验不过就阻止签名**——一个只会说"请签名"的页面是在训练用户盲签，而盲签正是钓鱼得手的前提。
+
+交易内容走 URL 的 `#` 片段，不会发给服务器，所以托管方也看不到任何人在签什么。
+
+这个页面不是必需的：机器人每条操作消息都同时给出原始 `to` + `calldata`，页面挂了用户照样能用任何钱包完成操作。
+
 ## AI 提案人服务
 
 链下机器人在 [`services/proposer/`](services/proposer/)，详见该目录的 README。

@@ -1,0 +1,446 @@
+/* global ethers */
+
+/**
+ * 签名页。
+ *
+ * 唯一职责：把机器人编码好的交易，翻译成用户看得懂的一句话，
+ * 验证它确实指向本协议的合约，然后交给用户自己的钱包去签。
+ *
+ * 三条不能妥协的原则：
+ *
+ * 1. **交易内容走 URL fragment（#），不走 query（?）。**
+ *    fragment 不会发给服务器，也不进 access log。
+ *    页面是静态的，托管方看不到任何人在签什么。
+ *
+ * 2. **解不出来就不放行。** 一个只会说「请签名」的签名页，
+ *    是在训练用户盲签。用户越习惯看不懂就点确认，
+ *    越容易在真正的钓鱼弹窗上点确认。所以这里宁可不可用。
+ *
+ * 3. **目标合约必须经工厂验证。** 任何人都能伪造一个签名链接。
+ *    页面会独立查链确认 `to` 是工厂登记过的托管实例
+ *    （approve 则确认 spender 是），验不过就拒绝。
+ */
+
+const $ = (id) => document.getElementById(id);
+
+const ESCROW_ABI = [
+  "function depositBuyer()",
+  "function depositSeller()",
+  "function cancelUnfunded()",
+  "function markDelivered(string evidenceURI)",
+  "function confirmReceipt()",
+  "function settleAfterInspection()",
+  "function claimNonDelivery()",
+  "function raiseDispute(string evidenceURI)",
+  "function submitEvidence(string evidenceURI)",
+];
+const FACTORY_ABI = [
+  "function createDeal(address token, address buyer, address seller, uint256 price, uint256 buyerBond, uint256 sellerBond, uint64 deliveryWindow, uint64 inspectionWindow, bytes32 termsHash) returns (address)",
+  "function isDeal(address) view returns (bool)",
+];
+const ERC20_ABI = [
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+];
+const DEAL_READ_ABI = [
+  "function token() view returns (address)",
+  "function price() view returns (uint256)",
+  "function buyerBond() view returns (uint256)",
+  "function sellerBond() view returns (uint256)",
+];
+
+const ifaces = {
+  escrow: new ethers.Interface(ESCROW_ABI),
+  factory: new ethers.Interface(FACTORY_ABI),
+  erc20: new ethers.Interface(ERC20_ABI),
+};
+
+/// 每个操作的人话描述。`risk` 决定确认区的视觉强度。
+/// irreversible 的那几个必须说清楚「不可撤销」—— 这是用户最需要
+/// 在点下去之前知道的一件事。
+const ACTIONS = {
+  approve: {
+    title: "授权托管合约划转你的代币",
+    risk: "medium",
+    note: "这一步本身不转账，只是允许托管合约在下一步划走指定额度。额度只给本次所需，不是无限授权。",
+  },
+  depositBuyer: {
+    title: "锁定货款与你的保证金",
+    risk: "high",
+    note: "资金将锁进托管合约。正常成交后货款给卖家、保证金退还你；若卖家违约，你可取回全部并获得对方的保证金。",
+  },
+  depositSeller: {
+    title: "锁定你的保证金",
+    risk: "high",
+    note: "保证金是你对履约的担保。正常成交后原额退还；若被裁定违约，将被罚没给买家。",
+  },
+  cancelUnfunded: {
+    title: "取消这笔尚未锁定的交易",
+    risk: "low",
+    note: "双方都完成入金前，任一方可无损退出。已入金的部分会原路退回。",
+  },
+  markDelivered: {
+    title: "标记已交付，开始验收期",
+    risk: "medium",
+    note: "买家将在验收期内确认收货或提起争议。验收期满无异议，货款自动放给你。",
+  },
+  confirmReceipt: {
+    title: "确认收货并放款给卖家",
+    risk: "irreversible",
+    note: "货款立即放给卖家，此操作不可撤销。请确认已收到货并验收无误。",
+  },
+  settleAfterInspection: {
+    title: "结算给卖家（验收期已满）",
+    risk: "medium",
+    note: "验收期届满且买家无异议，任何人都可以推动这笔结算。",
+  },
+  claimNonDelivery: {
+    title: "索取退款（卖家逾期未交付）",
+    risk: "medium",
+    note: "取回你的全部货款与保证金，卖家保证金原额退还。这是无过错取消，平台不收费。",
+  },
+  raiseDispute: {
+    title: "提起争议",
+    risk: "high",
+    note: "争议由仲裁层裁决，败诉方的保证金将被罚没给对方。恶意申诉同样会被罚没——这不是一个免费选项。",
+  },
+  submitEvidence: {
+    title: "提交证据",
+    risk: "low",
+    note: "向仲裁层补充材料。只记录证据链接，不转移任何资金。",
+  },
+  createDeal: {
+    title: "创建一笔担保交易",
+    risk: "low",
+    note: "仅创建合约实例，本步骤不锁定任何资金。双方各自入金后交易才正式生效。",
+  },
+};
+
+const state = {
+  tx: null,
+  decoded: null,
+  checks: [],
+  chain: null,
+  provider: null,
+  signer: null,
+};
+
+// ---------------------------------------------------------------- 解析
+
+function parseFragment() {
+  const m = location.hash.match(/[#&]tx=([A-Za-z0-9_-]+)/);
+  if (!m) throw new Error("链接里没有交易内容。请回到 Telegram 重新点击签名链接。");
+
+  let json;
+  try {
+    const b64 = m[1].replace(/-/g, "+").replace(/_/g, "/");
+    json = JSON.parse(atob(b64));
+  } catch {
+    throw new Error("链接内容已损坏，无法解析。请回到 Telegram 重新获取。");
+  }
+
+  for (const k of ["to", "data", "chainId"]) {
+    if (json[k] === undefined) throw new Error(`链接缺少必要字段 ${k}`);
+  }
+  if (!ethers.isAddress(json.to)) throw new Error("目标地址格式不合法");
+  if (!/^0x[0-9a-fA-F]*$/.test(json.data)) throw new Error("calldata 格式不合法");
+
+  return {
+    to: ethers.getAddress(json.to),
+    data: json.data,
+    value: BigInt(json.value ?? 0),
+    chainId: Number(json.chainId),
+  };
+}
+
+/// 尝试用三套 ABI 解码。解不出来返回 null —— 调用方必须据此拒绝放行。
+function decodeCalldata(data) {
+  for (const [kind, iface] of Object.entries(ifaces)) {
+    try {
+      const parsed = iface.parseTransaction({ data });
+      if (parsed) return { kind, name: parsed.name, args: parsed.args, signature: parsed.signature };
+    } catch {
+      /* 换下一套 */
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- 校验
+
+async function runChecks(tx, decoded, chain) {
+  const checks = [];
+  const add = (ok, label, detail) => checks.push({ ok, label, detail });
+
+  // 本协议的所有调用都不附带原生币。附带了就是有人在改造这笔交易。
+  add(tx.value === 0n, "不附带 ETH", tx.value === 0n ? "本协议的所有操作都不需要发送原生币" : `这笔交易试图发送 ${ethers.formatEther(tx.value)} ETH —— 本协议从不需要这样做`);
+
+  add(Boolean(decoded), "calldata 可解码",
+    decoded ? `${decoded.signature}` : "无法用本协议的任何 ABI 解出这笔调用的含义");
+
+  if (!decoded) return checks;
+
+  const rpc = new ethers.JsonRpcProvider(chain.rpcUrl);
+  const factory = new ethers.Contract(chain.factory, FACTORY_ABI, rpc);
+
+  try {
+    if (decoded.kind === "factory") {
+      const ok = tx.to.toLowerCase() === chain.factory.toLowerCase();
+      add(ok, "目标是官方工厂合约",
+        ok ? tx.to : `目标 ${tx.to} 不是配置里的工厂地址 ${chain.factory}`);
+    } else if (decoded.kind === "escrow") {
+      const ok = await factory.isDeal(tx.to);
+      add(ok, "目标是工厂登记的托管合约",
+        ok ? "已在链上验证" : "这个地址不是本协议工厂创建的。可能是钓鱼合约，请勿签名。");
+    } else if (decoded.kind === "erc20" && decoded.name === "approve") {
+      // approve 打给代币合约，所以要验的是被授权方（spender）
+      const spender = decoded.args[0];
+      const ok = await factory.isDeal(spender);
+      add(ok, "被授权方是工厂登记的托管合约",
+        ok ? spender : `被授权方 ${spender} 不是本协议的托管合约。签下去等于把代币划转权交给一个陌生合约。`);
+
+      // 授权额度不应超过该笔交易实际需要的金额
+      if (ok) {
+        try {
+          const deal = new ethers.Contract(spender, DEAL_READ_ABI, rpc);
+          const [price, bb, sb] = await Promise.all([deal.price(), deal.buyerBond(), deal.sellerBond()]);
+          const amount = decoded.args[1];
+          const need = amount === sb ? sb : price + bb;
+          const sane = amount <= (price + bb > sb ? price + bb : sb);
+          add(sane, "授权额度不超过交易所需",
+            sane ? "额度与该笔交易的入金金额一致" : `授权额度 ${amount} 超过了这笔交易可能需要的最大金额`);
+          void need;
+        } catch {
+          add(true, "授权额度检查", "无法读取交易金额，跳过该项");
+        }
+      }
+    }
+  } catch (e) {
+    add(false, "链上验证", `无法连接 RPC 完成验证：${e.message}`);
+  }
+
+  return checks;
+}
+
+// ---------------------------------------------------------------- 渲染
+
+function riskClass(risk) {
+  return { low: "risk-low", medium: "risk-medium", high: "risk-high", irreversible: "risk-irreversible" }[risk] ?? "risk-medium";
+}
+
+async function describeAmount(decoded, chain) {
+  if (!decoded) return null;
+  const rpc = new ethers.JsonRpcProvider(chain.rpcUrl);
+
+  try {
+    if (decoded.kind === "erc20" && decoded.name === "approve") {
+      const token = new ethers.Contract(state.tx.to, ERC20_ABI, rpc);
+      const [dec, sym] = await Promise.all([token.decimals(), token.symbol()]);
+      return `${ethers.formatUnits(decoded.args[1], dec)} ${sym}`;
+    }
+    if (decoded.kind === "escrow" && (decoded.name === "depositBuyer" || decoded.name === "depositSeller")) {
+      const deal = new ethers.Contract(state.tx.to, DEAL_READ_ABI, rpc);
+      const [tokenAddr, price, bb, sb] = await Promise.all([
+        deal.token(), deal.price(), deal.buyerBond(), deal.sellerBond(),
+      ]);
+      const token = new ethers.Contract(tokenAddr, ERC20_ABI, rpc);
+      const [dec, sym] = await Promise.all([token.decimals(), token.symbol()]);
+      const amt = decoded.name === "depositBuyer" ? price + bb : sb;
+      return `${ethers.formatUnits(amt, dec)} ${sym}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function render() {
+  const { tx, decoded, checks, chain } = state;
+  const action = decoded ? ACTIONS[decoded.name] : null;
+  const allOk = checks.every((c) => c.ok);
+
+  $("loading").hidden = true;
+  $("main").hidden = false;
+
+  $("action-title").textContent = action?.title ?? "无法识别的操作";
+  $("action-note").textContent = action?.note ?? "本页面无法解读这笔交易的含义。请勿签名。";
+  $("action-card").className = "card " + riskClass(action?.risk ?? "high");
+
+  if (action?.risk === "irreversible") {
+    $("irreversible").hidden = false;
+  }
+
+  $("chain-name").textContent = chain?.name ?? `链 ID ${tx.chainId}`;
+  $("tx-to").textContent = tx.to;
+  $("tx-data").textContent = tx.data;
+  $("tx-value").textContent = tx.value === 0n ? "0（不发送原生币）" : ethers.formatEther(tx.value) + " ETH";
+  $("tx-sig").textContent = decoded?.signature ?? "无法解码";
+
+  const list = $("checks");
+  list.innerHTML = "";
+  for (const c of checks) {
+    const li = document.createElement("li");
+    li.className = c.ok ? "ok" : "bad";
+    li.innerHTML = `<span class="mark">${c.ok ? "✓" : "✗"}</span><span><b></b><br><small></small></span>`;
+    li.querySelector("b").textContent = c.label;
+    li.querySelector("small").textContent = c.detail;
+    list.appendChild(li);
+  }
+
+  if (!allOk) {
+    $("blocked").hidden = false;
+    $("connect").disabled = true;
+    $("connect").textContent = "已阻止签名";
+  }
+}
+
+function showError(msg) {
+  $("loading").hidden = true;
+  $("fatal").hidden = false;
+  $("fatal-msg").textContent = msg;
+}
+
+// ---------------------------------------------------------------- 钱包
+
+function injectedProvider() {
+  if (typeof window.ethereum === "undefined") return null;
+  return window.ethereum;
+}
+
+async function connect() {
+  const eth = injectedProvider();
+  if (!eth) {
+    alert("没有检测到钱包。请在钱包内置浏览器里打开本页面，或安装浏览器钱包扩展。\n\n也可以复制下方的合约地址与 calldata，在任意钱包里手工发起这笔交易。");
+    return;
+  }
+
+  const btn = $("connect");
+  btn.disabled = true;
+  btn.textContent = "连接中…";
+
+  try {
+    const bp = new ethers.BrowserProvider(eth);
+    await bp.send("eth_requestAccounts", []);
+
+    const net = await bp.getNetwork();
+    if (Number(net.chainId) !== state.tx.chainId) {
+      btn.textContent = "切换网络…";
+      const hex = "0x" + state.tx.chainId.toString(16);
+      try {
+        await bp.send("wallet_switchEthereumChain", [{ chainId: hex }]);
+      } catch (e) {
+        // 4902 = 钱包里没有这条链
+        if (e?.error?.code === 4902 || e?.code === 4902) {
+          await bp.send("wallet_addEthereumChain", [{
+            chainId: hex,
+            chainName: state.chain.name,
+            rpcUrls: [state.chain.rpcUrl],
+            nativeCurrency: state.chain.nativeCurrency,
+            blockExplorerUrls: state.chain.explorer ? [state.chain.explorer] : [],
+          }]);
+        } else {
+          throw e;
+        }
+      }
+    }
+
+    state.provider = new ethers.BrowserProvider(eth);
+    state.signer = await state.provider.getSigner();
+
+    $("addr").textContent = await state.signer.getAddress();
+    $("connected").hidden = false;
+    btn.hidden = true;
+    $("sign").hidden = false;
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "连接钱包";
+    $("status").textContent = "连接失败：" + (e.shortMessage ?? e.message);
+  }
+}
+
+async function sign() {
+  const btn = $("sign");
+  btn.disabled = true;
+  btn.textContent = "请在钱包中确认…";
+  $("status").textContent = "";
+
+  try {
+    const sent = await state.signer.sendTransaction({
+      to: state.tx.to,
+      data: state.tx.data,
+      value: state.tx.value,
+    });
+
+    $("result").hidden = false;
+    $("txhash").textContent = sent.hash;
+    if (state.chain.explorer) {
+      const a = $("txlink");
+      a.href = `${state.chain.explorer}/tx/${sent.hash}`;
+      a.hidden = false;
+    }
+    btn.textContent = "等待上链确认…";
+
+    const rc = await sent.wait();
+    btn.textContent = rc.status === 1 ? "✓ 已完成" : "交易失败";
+    $("result-note").textContent = rc.status === 1
+      ? "可以回到 Telegram 继续了。"
+      : "交易被链上拒绝。请回到 Telegram 重新查看交易状态。";
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "签名并发送";
+    const msg = e.shortMessage ?? e.message ?? String(e);
+    $("status").textContent = /user rejected|ACTION_REJECTED/i.test(msg)
+      ? "你取消了签名。"
+      : "失败：" + msg;
+  }
+}
+
+// ---------------------------------------------------------------- 启动
+
+async function main() {
+  try {
+    state.tx = parseFragment();
+  } catch (e) {
+    return showError(e.message);
+  }
+
+  state.chain = window.ESCROW_CONFIG?.chains?.[state.tx.chainId];
+  if (!state.chain) {
+    return showError(`本页面未配置链 ID ${state.tx.chainId}。请联系服务提供方。`);
+  }
+  if (!ethers.isAddress(state.chain.factory) || state.chain.factory === ethers.ZeroAddress) {
+    return showError("本页面尚未配置工厂合约地址，无法验证交易目标的真伪，因此拒绝签名。");
+  }
+
+  state.decoded = decodeCalldata(state.tx.data);
+  state.checks = await runChecks(state.tx, state.decoded, state.chain);
+
+  render();
+
+  const amount = await describeAmount(state.decoded, state.chain);
+  if (amount) {
+    $("amount").textContent = amount;
+    $("amount-row").hidden = false;
+  }
+
+  $("connect").addEventListener("click", connect);
+  $("sign").addEventListener("click", sign);
+  $("toggle-raw").addEventListener("click", () => {
+    const box = $("raw");
+    box.hidden = !box.hidden;
+    $("toggle-raw").textContent = box.hidden ? "显示原始交易数据" : "隐藏原始交易数据";
+  });
+}
+
+/// 只改 URL 的 # 片段不会触发页面重载。
+///
+/// 如果不管这件事，用户从 Telegram 点开第二个签名链接时，
+/// 页面会继续显示**上一笔**交易的描述与核验结果，而 URL 里已经是新交易了 ——
+/// 他看到的和他即将签的不是同一个东西。这是能直接导致资金损失的错位。
+///
+/// 用整页重载而不是重新跑一遍 main()：签名器、连接状态、已通过的核验
+/// 全都是上一笔交易的上下文，任何残留都可能造成新的错位。
+window.addEventListener("hashchange", () => location.reload());
+
+main();

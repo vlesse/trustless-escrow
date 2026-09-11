@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "signing-page",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["services/signing-page/serve.cjs"],
+      "port": 8788
+    }
+  ]
+}
