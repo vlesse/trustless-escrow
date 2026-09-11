@@ -19,7 +19,7 @@ window.ESCROW_CONFIG = {
       name: "本地测试链",
       rpcUrl: "http://127.0.0.1:8545",
       explorer: "",
-      factory: "0x09635F643e140090A9A8Dcd712eD6285858ceBef",
+      factory: "0x0000000000000000000000000000000000000000",
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     },
   },
