@@ -1,0 +1,16 @@
+{
+  "name": "@trustless-escrow/bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram 前端：非托管，机器人永不接触私钥",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/bot.test.js",
+    "test:integration": "node test/integration.mjs"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  }
+}
