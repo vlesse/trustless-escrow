@@ -12,70 +12,117 @@
  *
  * 用法：
  *   npx hardhat run scripts/deploy.cjs --network <net>
- * 环境变量：
+ *
+ * 必填环境变量：
  *   FEE_BENEFICIARY   手续费最终收款地址（冷钱包）；immutable，部署后无法更改
  *   PROPOSER          AI 提案人地址
- *   FINAL_ARBITRATOR  终局仲裁方地址（质押陪审团 / Kleros adapter）
- *   FEE_BPS           手续费，基点，上限 100（=1%）
+ *   SETTLEMENT_TOKEN  结算币种（USDT / USDC）地址
+ *
+ * 选填：
+ *   FEE_BPS           协议手续费，基点，上限 100（=1%），默认 50
+ *   JURY_SIZE         陪审团席位数，必须为奇数，默认 5
+ *   MIN_STAKE         陪审员最低质押（最小单位），默认 1000e6
+ *   STAKE_PER_VOTE    每席位锁定/罚没额（最小单位），默认 100e6
+ *   OPT_COST          乐观层仲裁服务费，默认 100e6
+ *   JURY_COST         陪审团服务费，默认 60e6（必须 <= OPT_COST）
+ *   CHALLENGE_BOND    挑战保证金，默认 50e6
+ *   FINAL_ARBITRATOR  若已有终局仲裁方则填入，跳过部署 StakedJury
  */
 const { ethers } = require("hardhat");
 
+function req(name) {
+  const v = process.env[name];
+  if (!v || !ethers.isAddress(v)) throw new Error(`环境变量 ${name} 缺失或不是合法地址`);
+  return v;
+}
+const num = (name, dflt) => BigInt(process.env[name] ?? dflt);
+
 async function main() {
   const [deployer] = await ethers.getSigners();
-  const feeBeneficiary = process.env.FEE_BENEFICIARY;
-  const proposer = process.env.PROPOSER;
-  const finalArbitrator = process.env.FINAL_ARBITRATOR;
-  const feeBps = Number(process.env.FEE_BPS ?? 50);
 
-  for (const [k, v] of Object.entries({ FEE_BENEFICIARY: feeBeneficiary, PROPOSER: proposer, FINAL_ARBITRATOR: finalArbitrator })) {
-    if (!v || !ethers.isAddress(v)) throw new Error(`环境变量 ${k} 缺失或不是合法地址`);
-  }
+  const feeBeneficiary = req("FEE_BENEFICIARY");
+  const proposer = req("PROPOSER");
+  const settlementToken = req("SETTLEMENT_TOKEN");
+
+  const feeBps = Number(process.env.FEE_BPS ?? 50);
+  const jurySize = num("JURY_SIZE", 5);
+  const minStake = num("MIN_STAKE", 1000_000000n);
+  const stakePerVote = num("STAKE_PER_VOTE", 100_000000n);
+  const optCost = num("OPT_COST", 100_000000n);
+  const juryCost = num("JURY_COST", 60_000000n);
+  const challengeBond = num("CHALLENGE_BOND", 50_000000n);
+
+  if (juryCost > optCost) throw new Error("JURY_COST 必须 <= OPT_COST，否则乐观层无力支付陪审团");
 
   console.log("部署者:", deployer.address);
   console.log("手续费受益地址(immutable):", feeBeneficiary);
+  console.log("结算币种:", settlementToken);
   console.log("费率:", feeBps, "bps\n");
 
   // 1. 托管实现合约（immutable，逻辑永不可升级）
   const impl = await (await ethers.getContractFactory("Escrow")).deploy();
   await impl.waitForDeployment();
-  console.log("Escrow 实现       ", await impl.getAddress());
+  console.log("Escrow 实现          ", await impl.getAddress());
 
   // 2. 手续费金库（受益地址 immutable）
   const vault = await (await ethers.getContractFactory("FeeVault")).deploy(feeBeneficiary);
   await vault.waitForDeployment();
-  console.log("FeeVault          ", await vault.getAddress());
+  console.log("FeeVault             ", await vault.getAddress());
 
-  // 3. 预测 OptimisticArbitrator 的地址：它将是本账户的下下笔部署
-  //    （nonce+1 是工厂，nonce+2 才是仲裁层）
+  // 3. 终局仲裁方：质押陪审团
+  let finalArbitrator = process.env.FINAL_ARBITRATOR;
+  let jury = null;
+  if (finalArbitrator) {
+    if (!ethers.isAddress(finalArbitrator)) throw new Error("FINAL_ARBITRATOR 不是合法地址");
+    console.log("StakedJury            (沿用既有)", finalArbitrator);
+  } else {
+    jury = await (await ethers.getContractFactory("StakedJury")).deploy(
+      settlementToken, jurySize, minStake, stakePerVote, deployer.address
+    );
+    await jury.waitForDeployment();
+    finalArbitrator = await jury.getAddress();
+    console.log("StakedJury           ", finalArbitrator);
+  }
+
+  // 4. 预测 OptimisticArbitrator 的地址：它将是本账户的下下笔部署
   const nonce = await ethers.provider.getTransactionCount(deployer.address);
-  const predictedArbitrator = ethers.getCreateAddress({ from: deployer.address, nonce: nonce + 1 });
-  console.log("预测仲裁层地址     ", predictedArbitrator);
+  const predicted = ethers.getCreateAddress({ from: deployer.address, nonce: nonce + 1 });
+  console.log("预测仲裁层地址        ", predicted);
 
-  // 4. 工厂（nonce）
+  // 5. 工厂（nonce）
   const factory = await (await ethers.getContractFactory("EscrowFactory")).deploy(
-    await impl.getAddress(), predictedArbitrator, await vault.getAddress(), feeBps, deployer.address
+    await impl.getAddress(), predicted, await vault.getAddress(), feeBps, deployer.address
   );
   await factory.waitForDeployment();
-  console.log("EscrowFactory     ", await factory.getAddress());
+  console.log("EscrowFactory        ", await factory.getAddress());
 
-  // 5. 仲裁层（nonce+1）
+  // 6. 仲裁层（nonce+1）
   const optimistic = await (await ethers.getContractFactory("OptimisticArbitrator")).deploy(
     await factory.getAddress(), finalArbitrator, proposer, deployer.address
   );
   await optimistic.waitForDeployment();
   const actual = await optimistic.getAddress();
-  console.log("OptimisticArbitrator", actual);
+  console.log("OptimisticArbitrator ", actual);
 
-  if (actual.toLowerCase() !== predictedArbitrator.toLowerCase()) {
+  if (actual.toLowerCase() !== predicted.toLowerCase()) {
     throw new Error("地址预测失败 —— 部署中途 nonce 被占用，请重新部署");
   }
 
+  // 7. 费率配置。两层的费用必须满足 OPT_COST >= JURY_COST，
+  //    否则乐观层在升级争议时付不起陪审团的报酬（合约会在受理时拦住）。
+  if (jury) {
+    await (await jury.setCost(settlementToken, juryCost)).wait();
+    console.log("\n已配置 StakedJury.costOf =", juryCost.toString());
+  }
+  await (await optimistic.setCost(settlementToken, optCost, challengeBond)).wait();
+  console.log("已配置 OptimisticArbitrator.costOf =", optCost.toString(), " bond =", challengeBond.toString());
+
   console.log("\n后续必须手工完成：");
-  console.log("  1. optimistic.setCost(<USDT地址>, <仲裁服务费>, <挑战保证金>)");
-  console.log("     注意：挑战保证金必须 >= 终局仲裁方的成本，否则 createDispute 会 revert");
-  console.log("  2. 在区块浏览器上验证全部合约源码（透明度的前提）");
-  console.log("  3. 确认 FeeVault.beneficiary 指向正确的冷钱包 —— 此项永久不可更改");
+  console.log("  1. 在区块浏览器上验证全部合约源码（透明度的前提）");
+  console.log("  2. 确认 FeeVault.beneficiary 指向正确的冷钱包 —— 此项永久不可更改");
+  console.log("  3. 招募陪审员质押：陪审员池为空时争议无法受理");
   console.log("  4. 考虑在协议稳定后 factory.transferAdmin(address(0))，永久冻结参数");
+  console.log("  5. 承载真实资金前必须完成第三方安全审计");
 }
 
 main().catch((e) => {

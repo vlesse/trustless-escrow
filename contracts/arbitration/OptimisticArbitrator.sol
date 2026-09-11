@@ -60,6 +60,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         uint64 createdAt;
         address challenger;
         uint256 bond;         // 单边保证金金额（提案人与挑战者各质押这么多）
+        uint256 finalCost;    // 受理时快照的终局仲裁成本，防止中途被抬价
     }
 
     /// @notice 交易实例注册表（EscrowFactory），用于校验争议来源合法。
@@ -107,7 +108,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     error WindowOpen();
     error BadRuling();
     error CostNotConfigured();
-    error BondBelowFinalCost();
+    error CostBelowFinalCost();
     error ZeroAddress();
     error NothingToSweep();
 
@@ -144,8 +145,11 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         uint256 cost = costOf[token];
         if (cost == 0) revert CostNotConfigured();
 
-        uint256 bond = bondOf[token];
-        if (bond < IEscrowArbitrator(finalArbitrator).arbitrationCost(token, "")) revert BondBelowFinalCost();
+        // 终局仲裁方的报酬来自本层收取的仲裁服务费，而不是挑战保证金 ——
+        // 否则 escalateUnproposed 路径（无人质押）下陪审员就是白干活。
+        // 因此本层的服务费必须覆盖终局成本。
+        uint256 finalCost = IEscrowArbitrator(finalArbitrator).arbitrationCost(token, "");
+        if (cost < finalCost) revert CostBelowFinalCost();
 
         id = nextDisputeID++;
         disputes[id] = Dispute({
@@ -156,10 +160,11 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
             proposedAt: 0,
             createdAt: uint64(block.timestamp),
             challenger: address(0),
-            bond: bond
+            bond: bondOf[token],
+            finalCost: finalCost
         });
 
-        emit DisputeCreated(id, msg.sender, token, bond);
+        emit DisputeCreated(id, msg.sender, token, bondOf[token]);
     }
 
     /// @inheritdoc IEscrowArbitrator
@@ -201,7 +206,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         lockedBonds[d.token] += d.bond;
         d.token.safeTransferFrom(msg.sender, address(this), d.bond);
 
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, "");
+        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token));
         finalToLocal[finalID] = id;
 
         emit Challenged(id, msg.sender, finalID);
@@ -234,7 +239,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         if (block.timestamp <= uint256(d.createdAt) + PROPOSAL_WINDOW) revert WindowOpen();
 
         d.status = Status.Escalated;
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, "");
+        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token));
         finalToLocal[finalID] = id;
         emit Challenged(id, address(0), finalID);
     }
@@ -253,24 +258,29 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
         d.status = Status.Executed;
 
-        // 结算挑战保证金：终局裁决与 AI 提案不一致 → 挑战者赢，拿走双份保证金；
-        // 一致 → 提案人赢。若是 escalateUnproposed 路径（无人质押），跳过结算。
+        // 顺序不能颠倒：先让托管合约结算，这一步会把本层的仲裁服务费转入本合约，
+        // 终局仲裁方的报酬正是从这笔服务费里支付。
+        IEscrowArbitrable(d.arbitrable).rule(id, ruling);
+
+        // 结算挑战保证金：终局裁决与 AI 提案不一致 → 挑战者赢；一致 → 提案人赢。
+        // 双份保证金全额归胜方，不再被终局仲裁成本侵蚀 ——
+        // 挑战者的收益不应取决于陪审团收费多少。
+        // escalateUnproposed 路径无人质押，跳过本段。
         if (d.challenger != address(0)) {
             uint256 pool = d.bond * 2;
-            uint256 finalCost = IEscrowArbitrator(finalArbitrator).arbitrationCost(d.token, "");
-            if (finalCost > pool) finalCost = pool;
-
-            address winner = (ruling != d.proposedRuling) ? d.challenger : proposer;
-            uint256 award = pool - finalCost;
-
             lockedBonds[d.token] -= pool;
-
-            if (finalCost > 0) d.token.safeTransfer(finalArbitrator, finalCost);
-            if (award > 0) d.token.safeTransfer(winner, award);
-            emit BondSettled(id, winner, award);
+            address winner = (ruling != d.proposedRuling) ? d.challenger : proposer;
+            d.token.safeTransfer(winner, pool);
+            emit BondSettled(id, winner, pool);
         }
 
-        IEscrowArbitrable(d.arbitrable).rule(id, ruling);
+        // 支付终局仲裁方。以受理时快照的成本为准（防止中途抬价），
+        // 并以「可动用余额」为硬上限 —— 无论如何都不会动到在途保证金。
+        uint256 due = d.finalCost;
+        uint256 free = _freeBalance(d.token);
+        if (due > free) due = free;
+        if (due > 0) d.token.safeTransfer(finalArbitrator, due);
+
         emit Executed(id, uint8(ruling), true);
     }
 
@@ -300,9 +310,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     ///      即便 admin 私钥泄露，在途的提案人/挑战者保证金也拿不走。
     function sweep(address token, address to) external onlyAdmin returns (uint256 amount) {
         if (to == address(0)) revert ZeroAddress();
-        uint256 bal = SafeTransfer.balanceOf(token, address(this));
-        uint256 locked = lockedBonds[token];
-        amount = bal > locked ? bal - locked : 0;
+        amount = _freeBalance(token);
         if (amount == 0) revert NothingToSweep();
         token.safeTransfer(to, amount);
         emit FeesSwept(token, to, amount);
@@ -310,6 +318,12 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
     /// @notice 当前可归集的仲裁服务费（已扣除在途保证金）。
     function sweepable(address token) external view returns (uint256) {
+        return _freeBalance(token);
+    }
+
+    /// @dev 可动用余额 = 合约余额 − 在途保证金。
+    ///      所有对外支付都必须走这个上限，在途保证金在任何路径下都不可被动用。
+    function _freeBalance(address token) private view returns (uint256) {
         uint256 bal = SafeTransfer.balanceOf(token, address(this));
         uint256 locked = lockedBonds[token];
         return bal > locked ? bal - locked : 0;

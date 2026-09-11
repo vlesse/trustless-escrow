@@ -7,7 +7,7 @@ const U = (n) => BigInt(Math.round(n * 1e6));
 const PRICE = U(1000);
 const BOND = U(1000);
 const FEE_BPS = 50n;
-const ARB_COST = U(20);      // 乐观层收取的仲裁服务费
+const ARB_COST = U(40);      // 乐观层收取的仲裁服务费（必须 >= 终局成本）
 const CHAL_BOND = U(50);     // 提案人 / 挑战者各自质押
 const FINAL_COST = U(30);    // 终局仲裁方的成本
 
@@ -98,9 +98,9 @@ describe("两级乐观仲裁", function () {
     // 终局仲裁推翻：实际是卖家胜
     await finalArb.giveRuling(1, RULING_SELLER);
 
-    const award = CHAL_BOND * 2n - FINAL_COST;
+    const award = CHAL_BOND * 2n; // 双份保证金全额归胜方
     expect(await token.balanceOf(challenger.address) - cBefore)
-      .to.equal(award, "挑战者应获得扣除终局成本后的全部保证金");
+      .to.equal(award, "挑战者应获得双份保证金全额");
     expect(await token.balanceOf(seller.address) - sellerBefore)
       .to.equal(PRICE - (PRICE * FEE_BPS) / 10000n + BOND + BOND - ARB_COST, "卖家应按终局裁决获赔");
     expect(await token.balanceOf(await deal.getAddress())).to.equal(0n);
@@ -114,7 +114,7 @@ describe("两级乐观仲裁", function () {
     const pBefore = await token.balanceOf(proposer.address);
     await finalArb.giveRuling(1, RULING_BUYER); // 与 AI 一致
 
-    expect(await token.balanceOf(proposer.address) - pBefore).to.equal(CHAL_BOND * 2n - FINAL_COST);
+    expect(await token.balanceOf(proposer.address) - pBefore).to.equal(CHAL_BOND * 2n);
   });
 
   it("挑战窗口关闭后无法再挑战", async function () {
@@ -175,7 +175,7 @@ describe("两级乐观仲裁", function () {
     expect(await token.balanceOf(await optimistic.getAddress())).to.equal(locked);
     const cBefore = await token.balanceOf(challenger.address);
     await finalArb.giveRuling(1, RULING_SELLER);
-    expect(await token.balanceOf(challenger.address) - cBefore).to.equal(locked - FINAL_COST);
+    expect(await token.balanceOf(challenger.address) - cBefore).to.equal(locked);
   });
 
   it("重复归集会因无可归集余额而失败", async function () {
