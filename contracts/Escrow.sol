@@ -45,6 +45,29 @@ contract Escrow is IEscrowArbitrable {
         Cancelled   // 终态：未成交，原路退回
     }
 
+    /// @notice 终局原因。
+    ///
+    /// State 只说明「结束了」，说不清「为什么结束」：Cancelled 既可能是双方
+    /// 都还没入金时的无损退出，也可能是卖家逾期未交付被买家取回 —— 这两件事
+    /// 对卖家的含义天差地别。Resolved 同理，正常收货与仲裁败诉都是 Resolved。
+    ///
+    /// 这个区别此前只存在于事件日志里。日志无法被其它合约读取，也就意味着
+    /// 任何链上的声誉/统计层都无从判断一笔交易到底是怎么结束的。
+    ///
+    /// @dev 与 state / buyerFunded / sellerFunded / 三个 deadline 打包在同一个
+    ///      存储槽内（27 + 1 = 28 字节），而终态写入必定与 `state` 的写入同处
+    ///      一笔交易，因此这个字段的成本实际为零。
+    enum Outcome {
+        None,               // 未结束
+        CancelledUnfunded,  // 未完全入金时退出 —— 无人有过错
+        NonDelivery,        // 卖家逾期未标记交付，买家取回
+        Completed,          // 正常完成（确认收货 / 验收期届满）
+        DisputeBuyer,       // 争议：买家胜（卖家保证金被罚没）
+        DisputeSeller,      // 争议：卖家胜（买家保证金被罚没）
+        DisputeSplit,       // 争议：拒裁，中性拆分 —— 未认定任何一方有过错
+        DisputeStale        // 争议：仲裁方失联超时 —— 过错在仲裁层，不在双方
+    }
+
     // ------------------------------------------------------------ 交易条款
     // 全部在 initialize 时一次性写入，此后永不可变。
     // 尤其注意 arbitrator / feeBps / feeVault 是逐笔快照的：
@@ -71,6 +94,7 @@ contract Escrow is IEscrowArbitrable {
     // ---------------------------------------------------------------- 状态
 
     State public state;
+    Outcome public outcome;
     bool public buyerFunded;
     bool public sellerFunded;
 
@@ -219,6 +243,7 @@ contract Escrow is IEscrowArbitrable {
         if (state != State.Open) revert BadState();
         if (msg.sender != buyer && msg.sender != seller) revert NotParty();
         state = State.Cancelled;
+        outcome = Outcome.CancelledUnfunded;
 
         uint256 toBuyer = buyerFunded ? price + buyerBond : 0;
         uint256 toSeller = sellerFunded ? sellerBond : 0;
@@ -258,6 +283,7 @@ contract Escrow is IEscrowArbitrable {
         if (msg.sender != buyer) revert NotParty();
         if (block.timestamp < deliveryDeadline) revert TooEarly();
         state = State.Cancelled;
+        outcome = Outcome.NonDelivery;
         _payout(price + buyerBond, sellerBond, 0, 0);
     }
 
@@ -299,13 +325,16 @@ contract Escrow is IEscrowArbitrable {
         if (_ruling == RULING_BUYER) {
             // 卖家违约：卖家保证金先支付仲裁成本，余额罚没给买家。
             // 卖家作恶的成本因此为「全部保证金」，而不是原始构想里的零成本。
+            outcome = Outcome.DisputeBuyer;
             _payout(price + buyerBond + (sellerBond - cost), 0, cost, 0);
         } else if (_ruling == RULING_SELLER) {
             // 买家恶意申诉：买家保证金先支付仲裁成本，余额罚没给卖家。
             // 对称设计 —— 否则「谎称未收到货」会变成一个免费的攻击面。
+            outcome = Outcome.DisputeSeller;
             _payout(0, price - fee_ + sellerBond + (buyerBond - cost), cost, fee_);
         } else {
             // 拒裁 / 平局：中性拆分，仲裁成本双方均摊，平台不收费。
+            outcome = Outcome.DisputeSplit;
             _payout(price + buyerBond - cost / 2, sellerBond - (cost - cost / 2), cost, 0);
         }
     }
@@ -317,6 +346,7 @@ contract Escrow is IEscrowArbitrable {
         if (state != State.Disputed) revert BadState();
         if (block.timestamp < uint256(disputeRaisedAt) + DISPUTE_TIMEOUT) revert TooEarly();
         state = State.Resolved;
+        outcome = Outcome.DisputeStale;
         _payout(price + buyerBond, sellerBond, 0, 0);
     }
 
@@ -325,6 +355,7 @@ contract Escrow is IEscrowArbitrable {
     function _settleToSeller() private {
         uint256 fee_ = (price * feeBps) / 10_000;
         state = State.Resolved;
+        outcome = Outcome.Completed;
         _payout(buyerBond, price - fee_ + sellerBond, 0, fee_);
     }
 

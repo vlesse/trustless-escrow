@@ -34,10 +34,21 @@ export const ESCROW_ABI = [
 
 export const ERC20_ABI = ["function approve(address spender, uint256 amount) returns (bool)"];
 
+export const IDENTITY_BOND_ABI = [
+  "function bond(uint256 amount)",
+  "function requestUnbond()",
+  "function cancelUnbond()",
+  "function withdraw()",
+];
+
+export const REPUTATION_ABI = ["function record(address deal)"];
+
 const ifaces = {
   factory: new ethers.Interface(FACTORY_ABI),
   escrow: new ethers.Interface(ESCROW_ABI),
   erc20: new ethers.Interface(ERC20_ABI),
+  identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
+  reputation: new ethers.Interface(REPUTATION_ABI),
 };
 
 /**
@@ -96,3 +107,19 @@ export function buildCreateDeal(params) {
 
 export const buildAction = (escrow, method, args, label) =>
   buildTx("escrow", escrow, method, args, label);
+
+/// 押入身份押金：同样是先授权再押入，与交易入金一致。
+export function buildBondFlow(token, amount) {
+  return [
+    buildApprove(token, config.identityBond, amount),
+    buildTx("identityBond", config.identityBond, "bond", [amount], "押入身份押金"),
+  ];
+}
+
+export const buildBondAction = (method, label) =>
+  buildTx("identityBond", config.identityBond, method, [], label);
+
+/// 把一笔已结束交易的结果推上链。任何人都能调用 ——
+/// 所以受害者可以自己推送关于骗子的败诉记录，骗子无法压制。
+export const buildRecord = (deal) =>
+  buildTx("reputation", config.reputation, "record", [deal], "记录交易结果");

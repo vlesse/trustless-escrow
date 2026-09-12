@@ -43,6 +43,13 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
 ];
+const IDENTITY_BOND_ABI = [
+  "function bond(uint256 amount)",
+  "function requestUnbond()",
+  "function cancelUnbond()",
+  "function withdraw()",
+];
+const REPUTATION_ABI = ["function record(address deal)"];
 const DEAL_READ_ABI = [
   "function token() view returns (address)",
   "function price() view returns (uint256)",
@@ -54,6 +61,8 @@ const ifaces = {
   escrow: new ethers.Interface(ESCROW_ABI),
   factory: new ethers.Interface(FACTORY_ABI),
   erc20: new ethers.Interface(ERC20_ABI),
+  identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
+  reputation: new ethers.Interface(REPUTATION_ABI),
 };
 
 /// 每个操作的人话描述。`risk` 决定确认区的视觉强度。
@@ -114,6 +123,32 @@ const ACTIONS = {
     title: "创建一笔担保交易",
     risk: "low",
     note: "仅创建合约实例，本步骤不锁定任何资金。双方各自入金后交易才正式生效。",
+  },
+
+  bond: {
+    title: "押入身份押金",
+    risk: "medium",
+    note: "锁定一笔资金作为身份成本。没有任何人能罚没它，撤回需公示 14 天且只能整笔撤回。",
+  },
+  requestUnbond: {
+    title: "申请撤回身份押金",
+    risk: "medium",
+    note: "公示 14 天后可提取。签下这一笔之后，对手方看到的「承诺押金」会立刻变成 0。",
+  },
+  cancelUnbond: {
+    title: "撤销撤回申请",
+    risk: "low",
+    note: "押金恢复承诺状态，身份年龄保留。撤销次数会被永久记录。",
+  },
+  withdraw: {
+    title: "提取身份押金",
+    risk: "irreversible",
+    note: "提取后身份年龄归零。历史成交记录不会跟到新的押金上 —— 这等于销毁当前身份。",
+  },
+  record: {
+    title: "记录一笔交易的结果",
+    risk: "low",
+    note: "把一笔已结束交易的结果沉淀成双方的公开记录。不转移任何资金，记录写入后无法删除。",
   },
 };
 
@@ -193,15 +228,47 @@ async function runChecks(tx, decoded, chain) {
       const ok = await factory.isDeal(tx.to);
       add(ok, "目标是工厂登记的托管合约",
         ok ? "已在链上验证" : "这个地址不是本协议工厂创建的。可能是钓鱼合约，请勿签名。");
+    } else if (decoded.kind === "identityBond") {
+      // 押金合约地址只能来自本地 config，不能来自 URL 里的那笔交易本身 ——
+      // 否则「验证」等于拿攻击者给的答案去对攻击者出的题。
+      const configured = (chain.identityBond || "").toLowerCase();
+      const ok = Boolean(configured) && tx.to.toLowerCase() === configured;
+      add(ok, "目标是配置里的身份押金合约",
+        ok ? tx.to
+          : configured
+            ? `目标 ${tx.to} 不是配置的身份押金合约 ${chain.identityBond}`
+            : "本页未配置身份押金合约地址，无法验证目标，拒绝放行");
+    } else if (decoded.kind === "reputation") {
+      const configured = (chain.reputation || "").toLowerCase();
+      const ok = Boolean(configured) && tx.to.toLowerCase() === configured;
+      add(ok, "目标是配置里的信誉合约",
+        ok ? tx.to
+          : configured
+            ? `目标 ${tx.to} 不是配置的信誉合约 ${chain.reputation}`
+            : "本页未配置信誉合约地址，无法验证目标，拒绝放行");
     } else if (decoded.kind === "erc20" && decoded.name === "approve") {
       // approve 打给代币合约，所以要验的是被授权方（spender）
       const spender = decoded.args[0];
-      const ok = await factory.isDeal(spender);
-      add(ok, "被授权方是工厂登记的托管合约",
-        ok ? spender : `被授权方 ${spender} 不是本协议的托管合约。签下去等于把代币划转权交给一个陌生合约。`);
+      const toBond = Boolean(chain.identityBond)
+        && spender.toLowerCase() === chain.identityBond.toLowerCase();
+      const ok = toBond || (await factory.isDeal(spender));
+      add(ok, toBond ? "被授权方是配置里的身份押金合约" : "被授权方是工厂登记的托管合约",
+        ok ? spender : `被授权方 ${spender} 不是本协议的合约。签下去等于把代币划转权交给一个陌生合约。`);
+
+      // 无限授权在本协议里永远没有必要：每一步需要多少就授权多少。
+      // 出现无限额度，说明这笔交易不是本机器人构造的。
+      const MAX = (1n << 256n) - 1n;
+      const finite = decoded.args[1] < MAX;
+      add(finite, "不是无限授权",
+        finite ? "额度有限" : "这是一笔无限授权 —— 本协议的任何步骤都不需要它，请勿签名");
+
+      if (toBond) {
+        // 押入金额由用户自己决定，没有可对照的链上数字，检查到此为止
+        add(true, "授权额度检查", "身份押金金额由你自行决定，页面不做额度上限判断");
+      }
 
       // 授权额度不应超过该笔交易实际需要的金额
-      if (ok) {
+      if (ok && !toBond) {
         try {
           const deal = new ethers.Contract(spender, DEAL_READ_ABI, rpc);
           const [price, bb, sb] = await Promise.all([deal.price(), deal.buyerBond(), deal.sellerBond()]);
@@ -257,7 +324,19 @@ async function describeAmount(decoded, chain) {
 
 function render() {
   const { tx, decoded, checks, chain } = state;
-  const action = decoded ? ACTIONS[decoded.name] : null;
+  let action = decoded ? ACTIONS[decoded.name] : null;
+
+  // approve 有两个可能的被授权方（托管合约 / 身份押金合约）。
+  // 标题必须说的是这一笔真实的对象 —— 标题写「托管合约」而下面的核验行
+  // 写「身份押金合约」，用户就得自己去判断哪个才算数，这正是签名页要消灭的事。
+  if (action && decoded.name === "approve" && chain.identityBond
+      && decoded.args[0].toLowerCase() === chain.identityBond.toLowerCase()) {
+    action = {
+      ...action,
+      title: "授权身份押金合约划转你的代币",
+      note: "这一步本身不转账，只是允许身份押金合约在下一步划走指定额度。额度只给本次所需，不是无限授权。",
+    };
+  }
   const allOk = checks.every((c) => c.ok);
 
   $("loading").hidden = true;

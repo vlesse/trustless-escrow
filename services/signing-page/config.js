@@ -13,6 +13,10 @@ window.ESCROW_CONFIG = {
       rpcUrl: "https://arb1.arbitrum.io/rpc",
       explorer: "https://arbiscan.io",
       factory: "0x0000000000000000000000000000000000000000",
+      // 信誉层（可选）。留空则页面拒绝为身份押金相关调用放行 ——
+      // 无法验证目标地址时，不放行才是正确的默认。
+      identityBond: "",
+      reputation: "",
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     },
     31337: {
@@ -20,6 +24,10 @@ window.ESCROW_CONFIG = {
       rpcUrl: "http://127.0.0.1:8545",
       explorer: "",
       factory: "0x0000000000000000000000000000000000000000",
+      // 信誉层（可选）。留空则页面拒绝为身份押金相关调用放行 ——
+      // 无法验证目标地址时，不放行才是正确的默认。
+      identityBond: "",
+      reputation: "",
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     },
   },

@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import { config } from "./config.js";
 import { esc, sendMessage, keyboard, btn, urlBtn } from "./telegram.js";
 import * as session from "./session.js";
+import * as rep from "./reputation.js";
 import { buildChallenge, newNonce, verifyBinding } from "./wallet.js";
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
@@ -34,7 +35,7 @@ function renderTx(tx, idx = null, total = null) {
   return { text: lines.join("\n"), extra: rows.length ? keyboard(rows) : {} };
 }
 
-async function sendTxs(chatId, txs) {
+export async function sendTxs(chatId, txs) {
   for (let i = 0; i < txs.length; i++) {
     const { text, extra } = renderTx(txs[i], i + 1, txs.length);
     await sendMessage(chatId, text, extra);
@@ -73,6 +74,8 @@ export async function cmdHelp(chatId) {
     esc("/new     发起担保交易"),
     esc("/deals   我的交易列表"),
     esc("/deal <合约地址>  查看某笔交易详情与可用操作"),
+    esc("/rep [地址]  查看信誉记录（不填则看自己）"),
+    esc("/bond <金额>  押入身份押金 · /unbond 申请撤回 · /record <合约> 记录结果"),
     esc("/cancel  退出当前流程"),
     "",
     "*资金流向*",
@@ -87,6 +90,11 @@ export async function cmdHelp(chatId) {
     "*条款很重要*",
     esc("发起交易时填写的条款原文，其哈希会写上链。争议时只有哈希对得上的那份"),
     esc("才会被仲裁层认定为真本。请自行保存好原文。"),
+    "",
+    "*关于信誉*",
+    esc("信誉只在「对方保证金低于货款」时才需要。保证金不低于货款时，"),
+    esc("骗你这一笔的罚没大于收益 —— 那时你不需要相信任何人。"),
+    esc("身份押金不是罚金，没有任何人能罚没它。它买的是年龄：钱能瞬间凑齐，年龄不能。"),
   ].join("\n"));
 }
 
@@ -354,6 +362,27 @@ export async function cmdDeal(chatId, userId, addr) {
 
   lines.push("", `仲裁层: \`${esc(deal.arbitrator)}\``);
   lines.push(esc("入金前请自行核对这个仲裁层地址是不是你认可的那个。"));
+
+  // 对手方信誉。只在「还有得选」的时候才真正有用 ——
+  // 钱一旦锁进去，再好看的评估也改变不了什么，所以入金前这段放在最显眼处。
+  if (role && rep.enabled()) {
+    const counterparty = role === "buyer" ? deal.seller : deal.buyer;
+    const theirBond = role === "buyer" ? deal.sellerBond : deal.buyerBond;
+    try {
+      const profile = await rep.loadProfile(counterparty, deal.token, provider);
+      const assessment = rep.assess({ price: deal.price, counterpartyBond: theirBond, profile });
+      lines.push("", rep.renderAssessment({
+        profile, assessment, info,
+        roleLabel: role === "buyer" ? "卖家" : "买家",
+      }));
+      if (deal.state === State.Open) {
+        lines.push("", esc("以上是入金前唯一还能反悔的时机。资金一旦锁定，就只能走流程了。"));
+      }
+    } catch (e) {
+      // 信誉是参考信息，读不到不应当让整个交易详情页打不开
+      lines.push("", esc("（信誉数据读取失败，请自行谨慎评估对方）"));
+    }
+  }
 
   const rows = acts.map((a) => [btn(a.label, `act:${a.id}:${deal.address}`)]);
   rows.push([urlBtn("区块浏览器", explorerAddr(deal.address))]);

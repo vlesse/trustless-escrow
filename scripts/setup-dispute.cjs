@@ -93,8 +93,18 @@ async function main() {
     }))
   );
 
+  // 信誉层：与托管层完全解耦，这里一并部署供集成测试使用
+  const identityBond = await (await ethers.getContractFactory("IdentityBond"))
+    .deploy(await token.getAddress());
+  await identityBond.waitForDeployment();
+  const reputation = await (await ethers.getContractFactory("Reputation"))
+    .deploy(await factory.getAddress());
+  await reputation.waitForDeployment();
+
   const out = {
     rpcUrl: "http://127.0.0.1:8545",
+    identityBond: await identityBond.getAddress(),
+    reputation: await reputation.getAddress(),
     optimisticArbitrator: await optimistic.getAddress(),
     escrowFactory: await factory.getAddress(),
     stakedJury: await jury.getAddress(),

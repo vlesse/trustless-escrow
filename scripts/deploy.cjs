@@ -27,6 +27,7 @@
  *   JURY_COST         陪审团服务费，默认 60e6（必须 <= OPT_COST）
  *   CHALLENGE_BOND    挑战保证金，默认 50e6
  *   FINAL_ARBITRATOR  若已有终局仲裁方则填入，跳过部署 StakedJury
+ *   SKIP_REPUTATION   设为 1 则不部署信誉层（信誉层可选，托管功能不依赖它）
  */
 const { ethers } = require("hardhat");
 
@@ -117,12 +118,29 @@ async function main() {
   await (await optimistic.setCost(settlementToken, optCost, challengeBond)).wait();
   console.log("已配置 OptimisticArbitrator.costOf =", optCost.toString(), " bond =", challengeBond.toString());
 
+  // 8. 信誉层。刻意放在最后，且完全独立：
+  //    它是托管层的只读旁观者 —— 不被 Escrow 调用，也不持有任何资金。
+  //    部署失败、写错、甚至根本不部署，托管层的资金安全都不受影响。
+  if (process.env.SKIP_REPUTATION !== "1") {
+    const bond = await (await ethers.getContractFactory("IdentityBond")).deploy(settlementToken);
+    await bond.waitForDeployment();
+    console.log("IdentityBond         ", await bond.getAddress());
+
+    const reputation = await (await ethers.getContractFactory("Reputation")).deploy(
+      await factory.getAddress()
+    );
+    await reputation.waitForDeployment();
+    console.log("Reputation           ", await reputation.getAddress());
+  }
+
   console.log("\n后续必须手工完成：");
   console.log("  1. 在区块浏览器上验证全部合约源码（透明度的前提）");
   console.log("  2. 确认 FeeVault.beneficiary 指向正确的冷钱包 —— 此项永久不可更改");
   console.log("  3. 招募陪审员质押：陪审员池为空时争议无法受理");
   console.log("  4. 考虑在协议稳定后 factory.transferAdmin(address(0))，永久冻结参数");
-  console.log("  5. 承载真实资金前必须完成第三方安全审计");
+  console.log("  5. 把 IdentityBond / Reputation 地址填进机器人的 IDENTITY_BOND / REPUTATION，");
+  console.log("     以及签名页 config.js 的 identityBond / reputation —— 无法验证的目标签名页会拒绝放行");
+  console.log("  6. 承载真实资金前必须完成第三方安全审计");
 }
 
 main().catch((e) => {

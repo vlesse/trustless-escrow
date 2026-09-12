@@ -14,6 +14,16 @@ function addr(name) {
 
 const num = (name, dflt) => Number(process.env[name] ?? dflt);
 
+/// 可选地址。留空则对应功能关闭 —— 但填错必须立刻报错，
+/// 而不是悄悄当成「没配置」跑下去：那会让用户看到一个空的信誉页，
+/// 误以为对方真的没有记录。
+function optAddr(name) {
+  const v = process.env[name];
+  if (!v) return "";
+  if (!ethers.isAddress(v)) throw new Error(`环境变量 ${name} 不是合法地址: ${v}`);
+  return v;
+}
+
 export const config = {
   botToken: req("TELEGRAM_BOT_TOKEN"),
 
@@ -42,6 +52,11 @@ export const config = {
   /// 重组后已推送的消息会变成假消息，而用户可能已经据此发了货。
   confirmations: num("CONFIRMATIONS", 5),
 
+  /// 信誉层。两个地址都填上才启用 —— 只有一个的话展示会误导：
+  /// 「押金 0」在没接押金合约时和真的没押金长得一模一样。
+  reputation: optAddr("REPUTATION"),
+  identityBond: optAddr("IDENTITY_BOND"),
+
   stateFile: process.env.STATE_FILE ?? "./.bot-state.json",
 };
 
@@ -52,5 +67,6 @@ export function describeConfig() {
     `  工厂:       ${config.escrowFactory}`,
     `  签名页:     ${config.signingPageUrl || "(未配置，将只输出原始 calldata)"}`,
     `  限流:       ${config.rateLimitPerMin} 条/分钟/用户`,
+    `  信誉层:     ${config.reputation && config.identityBond ? `${config.reputation} / ${config.identityBond}` : "(未配置，已关闭)"}`,
   ].join("\n");
 }

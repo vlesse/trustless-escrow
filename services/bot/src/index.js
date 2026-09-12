@@ -3,6 +3,7 @@ import { updates, sendMessage, answerCallback, setMyCommands, getMe, esc } from 
 import * as session from "./session.js";
 import { scanForSecrets, secretWarning } from "./secrets.js";
 import * as cmd from "./commands.js";
+import * as repcmd from "./repcommands.js";
 import { start as startWatcher } from "./watcher.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
@@ -42,6 +43,10 @@ async function onMessage(msg) {
       case "/new": return cmd.cmdNew(chatId, userId);
       case "/deals": return cmd.cmdDeals(chatId, userId);
       case "/deal": return cmd.cmdDeal(chatId, userId, args[0] ?? "");
+      case "/rep": return repcmd.cmdRep(chatId, userId, args[0] ?? "");
+      case "/bond": return repcmd.cmdBond(chatId, userId, args[0] ?? "");
+      case "/unbond": return repcmd.cmdUnbond(chatId, userId);
+      case "/record": return repcmd.cmdRecord(chatId, userId, args[0] ?? "");
       case "/cancel":
         session.clearFlow(userId);
         return sendMessage(chatId, esc("已退出当前流程。"));
@@ -98,6 +103,8 @@ async function main() {
     { command: "new", description: "发起担保交易" },
     { command: "deals", description: "我的交易" },
     { command: "deal", description: "查看某笔交易" },
+    { command: "rep", description: "查看信誉记录" },
+    { command: "bond", description: "身份押金" },
     { command: "whoami", description: "当前绑定的地址" },
     { command: "cancel", description: "退出当前流程" },
     { command: "help", description: "使用说明" },
