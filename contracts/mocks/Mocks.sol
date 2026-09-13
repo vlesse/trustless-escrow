@@ -124,3 +124,110 @@ contract DirectArbitrator is IEscrowArbitrator {
         IEscrowArbitrable(arbitrable).rule(id, ruling);
     }
 }
+
+// ============================================================ 随机数来源
+
+interface IVRFConsumerMock {
+    function rawFulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) external;
+}
+
+/// @notice 假的 Chainlink 协调器。请求只记账，由测试手动触发回调 ——
+///         真实环境里回调是异步的，同步 mock 会掩盖「请求已发出但还没回来」
+///         这个最需要被测试的中间状态。
+contract MockVRFCoordinator {
+    uint256 public nextRequestId = 1;
+    mapping(uint256 => address) public callerOf;
+    bool public failRequests;
+
+    function setFailRequests(bool v) external {
+        failRequests = v;
+    }
+
+    struct RandomWordsRequest {
+        bytes32 keyHash;
+        uint256 subId;
+        uint16 requestConfirmations;
+        uint32 callbackGasLimit;
+        uint32 numWords;
+        bytes extraArgs;
+    }
+
+    function requestRandomWords(RandomWordsRequest calldata) external returns (uint256 id) {
+        require(!failRequests, "subscription underfunded");
+        id = nextRequestId++;
+        callerOf[id] = msg.sender;
+    }
+
+    function fulfill(uint256 requestId, uint256 word) external {
+        uint256[] memory words = new uint256[](1);
+        words[0] = word;
+        IVRFConsumerMock(callerOf[requestId]).rawFulfillRandomWords(requestId, words);
+    }
+}
+
+/// @notice 恶意来源：随时可以返回攻击者指定的「随机数」。
+///         用来验证「混合而不是替换」—— 即便这里完全可控，
+///         攻击者仍无法单独决定抽选结果。
+contract EvilRandomnessSource {
+    uint256 public value;
+    bool public ready;
+
+    function set(uint256 v) external {
+        value = v;
+        ready = true;
+    }
+
+    function requestRandomness(bytes32) external pure returns (uint256) {
+        return 1;
+    }
+
+    function randomnessOf(bytes32) external view returns (bool, uint256) {
+        return (ready, value);
+    }
+}
+
+/// @notice 坏掉的来源：请求与查询都 revert。
+contract RevertingRandomnessSource {
+    function requestRandomness(bytes32) external pure returns (uint256) {
+        revert("nope");
+    }
+
+    function randomnessOf(bytes32) external pure returns (bool, uint256) {
+        revert("nope");
+    }
+}
+
+/// @notice 烧 gas 的来源：验证限 gas 调用确实能兜住，
+///         而不是被它拖着一起 out-of-gas。
+contract GasBurningRandomnessSource {
+    uint256 private sink;
+
+    function requestRandomness(bytes32) external returns (uint256) {
+        while (true) sink++;
+        return 0;
+    }
+
+    function randomnessOf(bytes32) external view returns (bool, uint256) {
+        uint256 x = sink;
+        while (true) x = uint256(keccak256(abi.encode(x)));
+        return (false, 0);
+    }
+}
+
+/// @notice 请求成功、查询时烧光 gas 的来源。
+///
+/// 比 GasBurningRandomnessSource 更刁钻：案件已经把它快照进去了，退不掉，
+/// 只能靠调用方的限 gas + 超时兜底。这是「案件绑定了一个坏来源」的最坏情况。
+contract LazyGasBurningRandomnessSource {
+    uint256 private sink;
+
+    function requestRandomness(bytes32) external pure returns (uint256) {
+        return 1;
+    }
+
+    function randomnessOf(bytes32) external view returns (bool, uint256) {
+        uint256 x = sink;
+        while (true) x = uint256(keccak256(abi.encode(x)));
+        return (false, 0);
+    }
+}

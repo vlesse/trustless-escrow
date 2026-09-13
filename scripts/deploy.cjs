@@ -28,6 +28,14 @@
  *   CHALLENGE_BOND    挑战保证金，默认 50e6
  *   FINAL_ARBITRATOR  若已有终局仲裁方则填入，跳过部署 StakedJury
  *   SKIP_REPUTATION   设为 1 则不部署信誉层（信誉层可选，托管功能不依赖它）
+ *
+ * 陪审团随机数（可选，全部留空则用纯 blockhash）：
+ *   VRF_COORDINATOR   Chainlink VRF v2.5 协调器地址
+ *   VRF_KEY_HASH      gas lane 的 keyHash
+ *   VRF_SUB_ID        订阅号
+ *   VRF_EXTRA_ARGS    v2.5 扩展参数（付费方式），按 Chainlink 官方文档填
+ *   VRF_CONFIRMATIONS 请求确认数，默认 3
+ *   VRF_CALLBACK_GAS  回调 gas 上限，默认 500000
  */
 const { ethers } = require("hardhat");
 
@@ -118,7 +126,32 @@ async function main() {
   await (await optimistic.setCost(settlementToken, optCost, challengeBond)).wait();
   console.log("已配置 OptimisticArbitrator.costOf =", optCost.toString(), " bond =", challengeBond.toString());
 
-  // 8. 信誉层。刻意放在最后，且完全独立：
+  // 8. 陪审团随机数来源（可选）。
+  //    只在本脚本自己部署了陪审团时才接 —— 沿用既有陪审团时我们未必是它的
+  //    管理员，setRandomnessSource 会失败。
+  if (process.env.VRF_COORDINATOR) {
+    if (!jury) {
+      console.log("");
+      console.log("跳过 VRF：本次沿用了既有的 StakedJury，请由其管理员自行配置");
+    } else {
+      const src = await (await ethers.getContractFactory("ChainlinkVRFSource")).deploy(
+        req("VRF_COORDINATOR"),
+        finalArbitrator,
+        process.env.VRF_KEY_HASH,
+        BigInt(process.env.VRF_SUB_ID ?? 0),
+        Number(process.env.VRF_CONFIRMATIONS ?? 3),
+        Number(process.env.VRF_CALLBACK_GAS ?? 500000),
+        process.env.VRF_EXTRA_ARGS ?? "0x"
+      );
+      await src.waitForDeployment();
+      await (await jury.setRandomnessSource(await src.getAddress())).wait();
+      console.log("ChainlinkVRFSource   ", await src.getAddress());
+      console.log("  ↑ 记得把这个地址加进 Chainlink 订阅的 consumer 列表，并充值 LINK");
+      console.log("  ↑ 订阅没钱时随机数请求会失败，协议自动降级为纯 blockhash，资金不会卡住");
+    }
+  }
+
+  // 9. 信誉层。刻意放在最后，且完全独立：
   //    它是托管层的只读旁观者 —— 不被 Escrow 调用，也不持有任何资金。
   //    部署失败、写错、甚至根本不部署，托管层的资金安全都不受影响。
   if (process.env.SKIP_REPUTATION !== "1") {
@@ -140,7 +173,8 @@ async function main() {
   console.log("  4. 考虑在协议稳定后 factory.transferAdmin(address(0))，永久冻结参数");
   console.log("  5. 把 IdentityBond / Reputation 地址填进机器人的 IDENTITY_BOND / REPUTATION，");
   console.log("     以及签名页 config.js 的 identityBond / reputation —— 无法验证的目标签名页会拒绝放行");
-  console.log("  6. 承载真实资金前必须完成第三方安全审计");
+  console.log("  6. 若接了 VRF：把 ChainlinkVRFSource 加为订阅 consumer 并充值，否则会一直降级");
+  console.log("  7. 承载真实资金前必须完成第三方安全审计");
 }
 
 main().catch((e) => {

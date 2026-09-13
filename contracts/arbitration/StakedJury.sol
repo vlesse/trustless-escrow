@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {IEscrowArbitrator, IEscrowArbitrable} from "../interfaces/IEscrowArbitrator.sol";
 import {SafeTransfer} from "../lib/SafeTransfer.sol";
+import {IRandomnessSource} from "../interfaces/IRandomnessSource.sol";
 
 /// @title StakedJury
 /// @notice 终局仲裁方：质押陪审团 + commit-reveal 投票。
@@ -29,8 +30,14 @@ import {SafeTransfer} from "../lib/SafeTransfer.sol";
 ///    最优策略是投「你认为大多数诚实人会认为正确的那个答案」。
 ///    在证据清晰时，这个点就是真相。
 ///
+/// 4. **可插拔的随机数来源，且与区块哈希混合而不是替换**。
+///    详见 `drawJurors` 的注释 —— 那里解释了为什么「混合」这个选择
+///    比「替换」重要得多。
+///
 /// 已知局限（不藏着，使用前请自行评估）：
-///   - 随机数用 blockhash，出块者有有限的操纵能力。高价值争议应换 VRF。
+///   - 未配置随机数来源时退化为纯 blockhash，出块者有有限的操纵能力。
+///     配置之后这个能力被压缩到「必须持续审查 VRF 回调直到超时」，
+///     但没有被完全消除。
 ///   - 本版本裁决即终局，无上诉轮。上层 OptimisticArbitrator 已提供一级
 ///     （AI → 陪审团）的挑战机制，但陪审团本身的错判无法再被推翻。
 ///   - Schelling point 在证据模糊或存在大额贿赂时会失效，这是该类机制的固有边界。
@@ -54,6 +61,19 @@ contract StakedJury is IEscrowArbitrator {
     /// @notice 争议创建后延迟多少个区块才能抽选。
     /// @dev 必须 > 0：若用当前区块的哈希做种子，发起者可以预知结果并择时发起。
     uint64 public constant DRAW_DELAY = 10;
+
+    /// @notice 随机数来源的等待时限。超过此时限仍未返回，允许仅用区块哈希抽选。
+    ///
+    /// @dev 这个回退不是可选项，是必须的：没有它，一个停服的预言机就能让
+    ///      所有争议永久卡在待抽选状态，资金跟着卡住。
+    ///      代价是「持续审查 VRF 回调 2 小时」可以把随机性降级回纯 blockhash ——
+    ///      也就是降回本合约不接任何预言机时的水平，**不会更差**。
+    uint64 public constant RANDOMNESS_TIMEOUT = 2 hours;
+
+    /// @notice 调用随机数来源时的 gas 上限。
+    /// @dev 来源合约是管理员可配置的，因此必须当作恶意的来处理：
+    ///      不限 gas 的话，一个故意烧光 gas 的来源可以让争议根本创建不出来。
+    uint256 private constant RANDOMNESS_GAS = 200_000;
 
     uint64 public constant COMMIT_WINDOW = 3 days;
     uint64 public constant REVEAL_WINDOW = 2 days;
@@ -109,6 +129,13 @@ contract StakedJury is IEscrowArbitrator {
         uint64 commitDeadline;
         uint64 revealDeadline;
         uint64 createdAt;
+        /// @notice 随机数请求时间；0 表示本案未使用外部随机数来源。
+        uint64 rngRequestedAt;
+        /// @notice 本案使用的随机数来源，创建时快照。
+        /// @dev 逐案快照与本协议其它地方同理：管理员事后更换来源，
+        ///      不影响任何已经存在的案件。否则「看到一个不想输的案子再换来源」
+        ///      就成了一个现成的攻击路径。
+        address rngSource;
         uint256 rewardPool;    // 仲裁服务费 + 罚没所得，分给与多数一致者
         uint256 coherentCount; // 与终局裁决一致且已揭示的席位数
     }
@@ -119,6 +146,10 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 仲裁服务费，按币种计价。
     mapping(address => uint256) public costOf;
+
+    /// @notice 新案件默认使用的随机数来源。0 表示不使用（纯 blockhash）。
+    /// @dev 只影响**未来**的案件。已创建的案件用的是自己快照的那一个。
+    address public randomnessSource;
 
     address public admin;
 
@@ -134,6 +165,12 @@ contract StakedJury is IEscrowArbitrator {
     event JurorSlashed(uint256 indexed id, address indexed juror, uint256 amount, string reason);
     event RewardClaimed(uint256 indexed id, uint256 indexed slot, address indexed juror, uint256 amount);
     event DrawRescheduled(uint256 indexed id, uint64 newDrawBlock);
+    event RandomnessSourceChanged(address indexed from, address indexed to);
+    event RandomnessRequested(uint256 indexed id, address indexed source);
+    /// @notice 请求随机数失败。案件降级为纯 blockhash 抽选，但争议照常受理。
+    event RandomnessRequestFailed(uint256 indexed id, address indexed source);
+    /// @notice 等待超时，本案放弃外部随机数，仅用区块哈希抽选。
+    event RandomnessTimedOut(uint256 indexed id, address indexed source);
 
     // -------------------------------------------------------------- 错误
 
@@ -152,6 +189,7 @@ contract StakedJury is IEscrowArbitrator {
     error EmptyJuryPool();
     error CostNotConfigured();
     error SeedUnavailable();
+    error RandomnessPending();
     error NothingToClaim();
     error ZeroAddress();
     error TreeCorrupted();
@@ -246,9 +284,27 @@ contract StakedJury is IEscrowArbitrator {
             commitDeadline: 0,
             revealDeadline: 0,
             createdAt: uint64(block.timestamp),
+            rngRequestedAt: 0,
+            rngSource: address(0),
             rewardPool: 0,
             coherentCount: 0
         });
+
+        // 随机数请求失败绝不能阻断争议创建 —— 那等于让一个坏掉的预言机
+        // 剥夺当事人提起争议的权利。失败就降级为纯 blockhash，并留下事件。
+        address src = randomnessSource;
+        if (src != address(0)) {
+            (bool ok,) = src.call{gas: RANDOMNESS_GAS}(
+                abi.encodeCall(IRandomnessSource.requestRandomness, (_rngKey(id)))
+            );
+            if (ok) {
+                cases[id].rngSource = src;
+                cases[id].rngRequestedAt = uint64(block.timestamp);
+                emit RandomnessRequested(id, src);
+            } else {
+                emit RandomnessRequestFailed(id, src);
+            }
+        }
 
         emit CaseCreated(id, msg.sender, cases[id].drawBlock);
     }
@@ -258,24 +314,73 @@ contract StakedJury is IEscrowArbitrator {
         return cases[id].ruling;
     }
 
+    /// @dev 请求键绑定本合约地址与案件 ID：同一个来源可以同时服务多个
+    ///      陪审团实例，键不冲突，也无法被另一个实例冒领。
+    function _rngKey(uint256 id) private view returns (bytes32) {
+        return keccak256(abi.encodePacked(address(this), id));
+    }
+
+    /// @dev 限 gas 的只读调用。来源合约按「可能是恶意的」处理：
+    ///      revert、烧 gas、返回畸形数据，一律当作「尚未就绪」，
+    ///      绝不让它把抽选卡死。
+    function _readRandomness(address src, bytes32 key) private view returns (bool, uint256) {
+        (bool ok, bytes memory data) = src.staticcall{gas: RANDOMNESS_GAS}(
+            abi.encodeCall(IRandomnessSource.randomnessOf, (key))
+        );
+        if (!ok || data.length < 64) return (false, 0);
+        (bool ready, uint256 value) = abi.decode(data, (bool, uint256));
+        return (ready, value);
+    }
+
     // ============================================================== 抽选
 
     /// @notice 抽选陪审员。任何人可触发。
-    /// @dev 种子取自 drawBlock 的区块哈希 —— 该区块在争议创建时尚未产生，
-    ///      因此发起者无法预知会抽到谁。
+    ///
+    /// @dev 种子 = keccak256(区块哈希, 外部随机数, 案件 ID)。
+    ///
+    /// **为什么是混合而不是替换。** 外部随机数来源由管理员配置，
+    /// 如果直接拿它当种子，管理员就获得了一项本协议其它任何地方都不存在的权力：
+    /// 装一个自己写的「随机数」合约，从而**指定陪审员**。那比 blockhash 糟得多。
+    ///
+    /// 混合之后，最坏情况有了下界：
+    ///   - 来源作恶（返回攻击者指定的数字）→ 他还得同时操纵区块哈希；
+    ///   - 来源停摆或被审查 → 超时后退回纯 blockhash；
+    ///   - 来源诚实 → 出块者即便操纵区块哈希也无法预知 VRF 的输出。
+    /// 三种情况都不比「完全不接预言机」更差，而正常情况明显更好。
+    ///
+    /// **顺序不构成新的攻击面。** VRF 先于 drawBlock 返回时，该区块的出块者
+    /// 知道 VRF 值并可尝试研磨区块哈希 —— 这正是今天的水平。VRF 后返回时，
+    /// 预言机知道区块哈希，但 Chainlink VRF 的输出是可验证的：
+    /// 它只能扣住不发（→ 超时 → 退回 blockhash），不能挑一个自己想要的值。
     function drawJurors(uint256 id) external {
         Case storage c = cases[id];
         if (c.phase != Phase.Pending) revert BadPhase();
         if (block.number <= c.drawBlock) revert TooEarly();
 
-        bytes32 seed = blockhash(c.drawBlock);
-        if (seed == bytes32(0)) {
+        bytes32 bh = blockhash(c.drawBlock);
+        if (bh == bytes32(0)) {
             // blockhash 只能回溯 256 个区块。超期则重新安排抽选区块，
             // 而不是让案件永久卡死。
             c.drawBlock = uint64(block.number) + DRAW_DELAY;
             emit DrawRescheduled(id, c.drawBlock);
             return;
         }
+
+        uint256 rng = 0;
+        if (c.rngSource != address(0)) {
+            (bool ready, uint256 value) = _readRandomness(c.rngSource, _rngKey(id));
+            if (ready) {
+                rng = value;
+            } else if (block.timestamp < uint256(c.rngRequestedAt) + RANDOMNESS_TIMEOUT) {
+                // 还在等待窗口内。不允许抢跑降级 —— 否则任何人都能通过
+                // 抢在 VRF 返回之前调用本函数，把随机性白白降级回 blockhash。
+                revert RandomnessPending();
+            } else {
+                emit RandomnessTimedOut(id, c.rngSource);
+            }
+        }
+
+        bytes32 seed = keccak256(abi.encodePacked(bh, rng, id));
 
         address[] memory drawn = new address[](jurySize);
         for (uint256 i = 0; i < jurySize; i++) {
@@ -515,6 +620,20 @@ contract StakedJury is IEscrowArbitrator {
     }
 
     // ============================================================== 配置
+
+    /// @notice 配置新案件默认使用的随机数来源。0 表示不使用。
+    ///
+    /// @dev 只影响**未来**的案件 —— 已创建的案件用的是自己快照的那一个，
+    ///      所以管理员没法在看到一个不想输的案子之后再去换来源。
+    ///
+    ///      这仍然是一项需要被监督的权力：装一个自己控制的「随机数」合约，
+    ///      就能对未来案件的抽选施加影响。合约层的对策是把它的输出与区块哈希
+    ///      混合（见 drawJurors），所以这项权力的上限被压到了
+    ///      「和出块者研磨区块哈希差不多」，而不是「指定陪审员」。
+    function setRandomnessSource(address src) external onlyAdmin {
+        emit RandomnessSourceChanged(randomnessSource, src);
+        randomnessSource = src;
+    }
 
     function setCost(address token, uint256 cost) external onlyAdmin {
         costOf[token] = cost;
