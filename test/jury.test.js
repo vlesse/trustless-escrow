@@ -16,9 +16,10 @@ const ARB_COST = U(60); // 可被 JURY_SIZE 整除，便于核对分成
 const DRAW_DELAY = 10;
 const COMMIT_WINDOW = 3 * 24 * 3600;
 const REVEAL_WINDOW = 2 * 24 * 3600;
-const CASE_TIMEOUT = 14 * 24 * 3600;
+const APPEAL_WINDOW = 2 * 24 * 3600;
+const ROUND_TIMEOUT = 10 * 24 * 3600;
 
-const Phase = { None: 0n, Pending: 1n, Commit: 2n, Reveal: 3n, Executed: 4n };
+const Phase = { None: 0n, Pending: 1n, Commit: 2n, Reveal: 3n, Appealable: 4n, Executed: 5n };
 
 const commitment = (ruling, salt, juror) =>
   ethers.solidityPackedKeccak256(["uint8", "bytes32", "address"], [ruling, salt, juror]);
@@ -84,6 +85,14 @@ describe("质押陪审团", function () {
   }
 
   const signerOf = (addr) => [j1, j2, j3].find((s) => s.address === addr);
+
+  // 结轮之后裁决并不会立刻投递给托管合约 —— 要先走完上诉窗口。
+  // 绝大多数用例关心的是「最终判成了什么」，所以把两步打包。
+  async function settle(id, who = outsider) {
+    await jury.connect(who).tallyRound(id);
+    await time.increase(APPEAL_WINDOW + 1);
+    await jury.connect(who).finalize(id);
+  }
 
   /// 陪审员是放回抽样 —— 同一个人可能占据多个席位（多锁一份质押、多一票、
   /// 也多一份罚没风险）。所以预期值必须按「实际抽到的席位归属」计算，
@@ -195,7 +204,7 @@ describe("质押陪审团", function () {
       await time.increase(REVEAL_WINDOW + 1);
 
       const buyerBefore = await token.balanceOf(buyer.address);
-      await jury.connect(outsider).executeCase(id); // 任何人可推动
+      await settle(id); // 任何人可推动
 
       // 裁决 1 = 买家胜
       expect(await token.balanceOf(buyer.address) - buyerBefore)
@@ -205,8 +214,9 @@ describe("质押陪审团", function () {
 
       const c = await jury.cases(id);
       expect(c.ruling).to.equal(1n);
-      expect(c.coherentCount).to.equal(JURY_SIZE);
-      expect(c.rewardPool).to.equal(ARB_COST);
+      const r0 = await jury.rounds(id, 0);
+      expect(r0.coherentCount).to.equal(JURY_SIZE);
+      expect(r0.rewardPool).to.equal(ARB_COST);
 
       // 每个一致席位领取 ARB_COST / 3
       for (let i = 0; i < slots.length; i++) {
@@ -236,13 +246,13 @@ describe("质押陪审团", function () {
 
       const { exp, coherentCount } = expectedStakes(slots, rulings, 1);
 
-      await expect(jury.executeCase(id))
+      await expect(jury.tallyRound(id))
         .to.emit(jury, "JurorSlashed")
         .withArgs(id, slots[2], STAKE_PER_VOTE, "INCOHERENT");
 
-      const c = await jury.cases(id);
-      expect(c.ruling).to.equal(1n, "2:1 应裁定为 1");
-      expect(c.coherentCount).to.equal(BigInt(coherentCount));
+      const r0 = await jury.rounds(id, 0);
+      expect(r0.ruling).to.equal(1n, "2:1 应裁定为 1");
+      expect(r0.coherentCount).to.equal(BigInt(coherentCount));
 
       // 少数派席位被罚没，罚没所得平分补进多数派席位
       for (const [addr, expected] of Object.entries(exp)) {
@@ -269,7 +279,7 @@ describe("质押陪审团", function () {
 
       const { exp } = expectedStakes(slots, [1, 1, null], 1);
 
-      await expect(jury.executeCase(id))
+      await expect(jury.tallyRound(id))
         .to.emit(jury, "JurorSlashed")
         .withArgs(id, slots[2], STAKE_PER_VOTE, "NO_REVEAL");
 
@@ -288,7 +298,7 @@ describe("质押陪审团", function () {
 
       const buyerBefore = await token.balanceOf(buyer.address);
       const sellerBefore = await token.balanceOf(seller.address);
-      await jury.executeCase(id);
+      await settle(id);
 
       // ruling 0 → 托管合约按拒裁做中性拆分
       expect(await token.balanceOf(buyer.address) - buyerBefore).to.equal(PRICE + BOND - ARB_COST / 2n);
@@ -360,14 +370,14 @@ describe("质押陪审团", function () {
       await expect(disputedDeal()).to.be.revertedWithCustomError(jury, "EmptyJuryPool");
     });
 
-    it("案件卡死超过 14 天，任何人可触发拒裁取回资金", async function () {
+    it("单轮卡死超过 ROUND_TIMEOUT，任何人可触发拒裁取回资金", async function () {
       await seatJurors();
       const { deal, id } = await disputedDeal();
       await draw(id);
 
       await expect(jury.timeoutCase(id)).to.be.revertedWithCustomError(jury, "TooEarly");
 
-      await time.increase(CASE_TIMEOUT + 1);
+      await time.increase(ROUND_TIMEOUT + 1);
       const buyerBefore = await token.balanceOf(buyer.address);
       await jury.connect(outsider).timeoutCase(id);
 
@@ -382,7 +392,7 @@ describe("质押陪审团", function () {
       const slots = await draw(id);
       const before = await jury.stakeOf(slots[0]);
 
-      await time.increase(CASE_TIMEOUT + 1);
+      await time.increase(ROUND_TIMEOUT + 1);
       await jury.timeoutCase(id);
 
       expect(await jury.stakeOf(slots[0])).to.equal(before, "不应罚没");

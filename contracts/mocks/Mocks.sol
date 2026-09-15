@@ -231,3 +231,26 @@ contract LazyGasBurningRandomnessSource {
         return (false, 0);
     }
 }
+
+/// @notice 按 key 记账的随机数来源，用于验证「每一轮请求各自的随机数」。
+/// @dev 刻意不实现任何 Chainlink 细节 —— 这里要验的是陪审团的请求键是否
+///      按轮次区分，与具体预言机无关。
+contract MockRandomnessSource {
+    mapping(bytes32 => bool) public isRequested;
+    mapping(bytes32 => uint256) private _value;
+    mapping(bytes32 => bool) private _ready;
+
+    function requestRandomness(bytes32 key) external returns (uint256) {
+        isRequested[key] = true;
+        return uint256(key);
+    }
+
+    function fulfill(bytes32 key, uint256 v) external {
+        _ready[key] = true;
+        _value[key] = v;
+    }
+
+    function randomnessOf(bytes32 key) external view returns (bool, uint256) {
+        return (_ready[key], _value[key]);
+    }
+}

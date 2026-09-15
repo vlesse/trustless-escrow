@@ -27,7 +27,15 @@ contract Escrow is IEscrowArbitrable {
 
     /// @notice 仲裁方失联保护：争议提起后超过此时限仍无裁决，
     ///         任何人可触发中性拆分，资金不会永久锁死。
-    uint64 public constant DISPUTE_TIMEOUT = 30 days;
+    ///
+    /// @dev 这个数字必须**大于整条仲裁链路走满所有窗口的最坏耗时**，
+    ///      否则一个正常推进、只是走到了第三轮上诉的案件会被这里提前打断，
+    ///      改判平局 —— 兜底机制把正常流程打死，比没有兜底更糟。
+    ///      最坏耗时 = 乐观层提案 72h + 挑战 48h
+    ///              + 陪审团 3 轮 x（提交 3d + 揭示 2d）+ 2 个上诉窗口 x 2d
+    ///              + 最后一轮彻底卡死时的 ROUND_TIMEOUT 10d。
+    ///      45 天在此之上留了余量。缩短任何一个窗口之前，先重算这条式子。
+    uint64 public constant DISPUTE_TIMEOUT = 45 days;
 
     uint256 private constant RULING_REFUSED = 0;
     uint256 private constant RULING_BUYER = 1;

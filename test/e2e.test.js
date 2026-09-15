@@ -20,6 +20,7 @@ const STAKE_PER_VOTE = U(100);
 const commitment = (ruling, salt, juror) =>
   ethers.solidityPackedKeccak256(["uint8", "bytes32", "address"], [ruling, salt, juror]);
 const SALT = ethers.id("e2e-salt");
+const APPEAL_WINDOW = 2 * 24 * 3600;
 
 /// 全链路：Escrow → OptimisticArbitrator → StakedJury
 /// 前面的测试分别用 mock 验证过各层，这里验证三层真实串联时
@@ -118,7 +119,9 @@ describe("全链路集成", function () {
       optimistic: await token.balanceOf(await optimistic.getAddress()),
     };
 
-    await jury.connect(outsider).executeCase(juryCaseID);
+    await jury.connect(outsider).tallyRound(juryCaseID);
+    await time.increase(APPEAL_WINDOW + 1); // 无人上诉，裁决才落地
+    await jury.connect(outsider).finalize(juryCaseID);
 
     // 托管合约：按「卖家胜」结算，买家保证金被罚没给卖家
     expect(await deal.state()).to.equal(5n, "应进入 Resolved");
@@ -143,7 +146,7 @@ describe("全链路集成", function () {
       .to.equal(JURY_COST, "陪审团应收到服务费");
     const c = await jury.cases(juryCaseID);
     expect(c.ruling).to.equal(2n);
-    expect(c.rewardPool).to.equal(JURY_COST);
+    expect((await jury.rounds(juryCaseID, 0)).rewardPool).to.equal(JURY_COST);
 
     // 陪审员按席位平分
     for (let i = 0; i < n; i++) {

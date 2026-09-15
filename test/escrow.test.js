@@ -257,7 +257,7 @@ describe("托管协议", function () {
       await expect(deal.connect(outsider).resolveStaleDispute())
         .to.be.revertedWithCustomError(deal, "TooEarly");
 
-      await time.increase(30 * 24 * 3600 + 1);
+      await time.increase(45 * 24 * 3600 + 1);
       const b0 = await balances();
       await deal.connect(outsider).resolveStaleDispute();
       const d = diff(b0, await balances());

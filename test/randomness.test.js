@@ -97,7 +97,7 @@ describe("陪审团抽选的随机数", function () {
       expect(c.rngSource).to.equal(await source.getAddress());
       expect(c.rngRequestedAt).to.be.greaterThan(0n);
       expect(await source.isRequested(
-        ethers.solidityPackedKeccak256(["address", "uint256"], [await jury.getAddress(), id])
+        ethers.solidityPackedKeccak256(["address", "uint256", "uint256"], [await jury.getAddress(), id, 0])
       )).to.equal(true);
     });
 
@@ -322,7 +322,7 @@ describe("陪审团抽选的随机数", function () {
 
     it("结果一旦产生就不可更改 —— 重摇比没有随机数更糟", async function () {
       const id = await newCase();
-      const key = ethers.solidityPackedKeccak256(["address", "uint256"], [await jury.getAddress(), id]);
+      const key = ethers.solidityPackedKeccak256(["address", "uint256", "uint256"], [await jury.getAddress(), id, 0]);
 
       await coordinator.fulfill(1, 111n);
       expect((await source.randomnessOf(key))[1]).to.equal(111n);
@@ -345,8 +345,8 @@ describe("陪审团抽选的随机数", function () {
 
     it("请求键绑定了陪审团地址，另一个实例无法冒领", async function () {
       const id = await newCase();
-      const key = ethers.solidityPackedKeccak256(["address", "uint256"], [await jury.getAddress(), id]);
-      const foreign = ethers.solidityPackedKeccak256(["address", "uint256"], [owner.address, id]);
+      const key = ethers.solidityPackedKeccak256(["address", "uint256", "uint256"], [await jury.getAddress(), id, 0]);
+      const foreign = ethers.solidityPackedKeccak256(["address", "uint256", "uint256"], [owner.address, id, 0]);
       expect(await source.isRequested(key)).to.equal(true);
       expect(await source.isRequested(foreign)).to.equal(false);
     });

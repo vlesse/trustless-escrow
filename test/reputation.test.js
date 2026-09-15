@@ -105,7 +105,7 @@ describe("信誉层", function () {
       const deal = await fundedDeal();
       await deal.connect(seller).markDelivered("ipfs://x");
       await deal.connect(buyer).raiseDispute("ipfs://e");
-      await time.increase(30 * DAY + 1);
+      await time.increase(45 * DAY + 1);
       await deal.resolveStaleDispute();
       expect(await deal.outcome()).to.equal(Outcome.DisputeStale);
     });
