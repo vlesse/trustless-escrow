@@ -1,0 +1,6 @@
+{
+  "filter_paths": "contracts/mocks",
+  "exclude_informational": false,
+  "exclude_optimization": true,
+  "detectors_to_exclude": "uninitialized-local,incorrect-equality,timestamp,reentrancy-events,reentrancy-benign,naming-convention,too-many-digits,solc-version"
+}

@@ -4,3 +4,7 @@ cache/
 out/
 .env
 .localnet.json
+
+# 自审工具输出
+slither.json
+slither.txt

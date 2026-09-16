@@ -37,7 +37,6 @@ contract Escrow is IEscrowArbitrable {
     ///      45 天在此之上留了余量。缩短任何一个窗口之前，先重算这条式子。
     uint64 public constant DISPUTE_TIMEOUT = 45 days;
 
-    uint256 private constant RULING_REFUSED = 0;
     uint256 private constant RULING_BUYER = 1;
     uint256 private constant RULING_SELLER = 2;
 

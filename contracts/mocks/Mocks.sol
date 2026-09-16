@@ -254,3 +254,104 @@ contract MockRandomnessSource {
         return (_ready[key], _value[key]);
     }
 }
+
+/// @notice 转账时回调一次的恶意代币，用于验证重入防护。
+///
+/// @dev 现实里对应的是「带转账钩子的代币」（ERC777 之类，或者干脆是攻击者
+///      自己发的币）。它能进入本协议的前提是管理员给它配过仲裁费 ——
+///      `costOf[token] == 0` 会让争议压根创建不出来，那是一道隐式白名单。
+///      但「安全性依赖于管理员永远不配错币种」是一条没写下来的前提，
+///      所以合约层必须自己挡住，而不是指望配置。
+contract ReentrantToken {
+    string public name = "Reentrant";
+    string public symbol = "REE";
+    uint8 public constant decimals = 6;
+
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    bytes public payload;
+    bool public armed;
+    bool public reentryAttempted;
+    bool public reentrySucceeded;
+
+    function mint(address to, uint256 amt) external {
+        balanceOf[to] += amt;
+    }
+
+    function approve(address s, uint256 a) external returns (bool) {
+        allowance[msg.sender][s] = a;
+        return true;
+    }
+
+    /// @notice 装弹：下一次转账时回调付款方一次，调用 `p`。
+    function arm(bytes calldata p) external {
+        payload = p;
+        armed = true;
+        reentryAttempted = false;
+        reentrySucceeded = false;
+    }
+
+    /// @dev 回调**付款方本人**，而不是别的地址 —— ERC777 的 tokensToSend 就是这个语义。
+    ///      这一点是复现攻击的关键：回调必须打到持币且有授权的那个合约身上，
+    ///      它才可能真的再发起一次业务调用。打给代币自己是打不动任何东西的
+    ///      （代币没有余额也没有授权，重入会因为「没钱」而失败，
+    ///      于是测试会绿得毫无意义）。
+    function _hook(address from) private {
+        if (!armed) return;
+        armed = false; // 只回调一次，否则会无限递归
+        reentryAttempted = true;
+        (bool ok,) = from.call(payload);
+        reentrySucceeded = ok;
+    }
+
+    function transfer(address to, uint256 a) external returns (bool) {
+        balanceOf[msg.sender] -= a;
+        balanceOf[to] += a;
+        _hook(msg.sender);
+        return true;
+    }
+
+    function transferFrom(address f, address t, uint256 a) external returns (bool) {
+        uint256 al = allowance[f][msg.sender];
+        if (al != type(uint256).max) allowance[f][msg.sender] = al - a;
+        balanceOf[f] -= a;
+        balanceOf[t] += a;
+        _hook(f);
+        return true;
+    }
+}
+
+interface IAppealTarget {
+    function appeal(uint256 id) external;
+}
+
+/// @notice 模拟真实攻击者：一个持币并已授权的合约，在代币回调里再打一次 appeal。
+contract AppealReenterer {
+    address public jury;
+    uint256 public caseId;
+    bool public armed;
+    bool public reentryAttempted;
+    bool public reentrySucceeded;
+
+    function approveToken(address token, address spender, uint256 amount) external {
+        (bool ok,) = token.call(abi.encodeWithSignature("approve(address,uint256)", spender, amount));
+        require(ok, "approve failed");
+    }
+
+    /// @notice 外层调用。代币会在转账中途回调本合约的 onCallback()。
+    function go(address _jury, uint256 id) external {
+        jury = _jury;
+        caseId = id;
+        armed = true;
+        IAppealTarget(_jury).appeal(id);
+    }
+
+    function onCallback() external {
+        if (!armed) return;
+        armed = false;
+        reentryAttempted = true;
+        (bool ok,) = jury.call(abi.encodeWithSignature("appeal(uint256)", caseId));
+        reentrySucceeded = ok;
+    }
+}

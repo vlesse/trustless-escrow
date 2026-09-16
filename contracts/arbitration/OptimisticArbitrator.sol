@@ -98,6 +98,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     event Executed(uint256 indexed id, uint8 ruling, bool wasChallenged);
     event BondSettled(uint256 indexed id, address indexed winner, uint256 amount);
     event FeesSwept(address indexed token, address indexed to, uint256 amount);
+    event AdminTransferred(address indexed from, address indexed to);
 
     error NotAdmin();
     error NotProposer();
@@ -111,6 +112,18 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     error CostBelowFinalCost();
     error ZeroAddress();
     error NothingToSweep();
+    error Reentrancy();
+
+    /// @dev 本合约同时保管提案人与挑战者的保证金，币种由每笔交易决定。
+    ///      带转账回调的代币能在转账中途重新进入本合约，所以必须有锁。
+    bool private _entered;
+
+    modifier nonReentrant() {
+        if (_entered) revert Reentrancy();
+        _entered = true;
+        _;
+        _entered = false;
+    }
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -137,7 +150,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @dev 准入校验：调用方必须是工厂登记过的托管实例。
     ///      否则任何人都能部署一个假 arbitrable 来消耗提案人资源，
     ///      或诱导裁决回调打到非预期的合约上。
-    function createDispute(uint256 choices, bytes calldata) external returns (uint256 id) {
+    function createDispute(uint256 choices, bytes calldata) external nonReentrant returns (uint256 id) {
         if (!registry.isDeal(msg.sender)) revert NotRegisteredDeal();
         if (choices != 2) revert BadRuling();
 
@@ -177,7 +190,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
     /// @notice AI 提交默认裁决，并质押保证金。
     /// @dev 保证金让机器人对自己的结论有实际风险敞口。
-    function propose(uint256 id, uint8 ruling) external {
+    function propose(uint256 id, uint8 ruling) external nonReentrant {
         if (msg.sender != proposer) revert NotProposer();
         Dispute storage d = disputes[id];
         if (d.status != Status.Open) revert BadStatus();
@@ -196,7 +209,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @notice 挑战默认裁决，质押等额保证金，案件升级到终局仲裁。
     /// @dev 刻意不限制调用者身份 —— 任何旁观者都可以推翻一个明显的错判并获利。
     ///      这是让机器人「不成为单点」的关键：纠错权是开放的。
-    function challenge(uint256 id) external {
+    function challenge(uint256 id) external nonReentrant {
         Dispute storage d = disputes[id];
         if (d.status != Status.Proposed) revert BadStatus();
         if (block.timestamp > uint256(d.proposedAt) + CHALLENGE_WINDOW) revert WindowClosed();
@@ -213,7 +226,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     }
 
     /// @notice 挑战窗口届满无人挑战，默认裁决生效。任何人可触发。
-    function execute(uint256 id) external {
+    function execute(uint256 id) external nonReentrant {
         Dispute storage d = disputes[id];
         if (d.status != Status.Proposed) revert BadStatus();
         if (block.timestamp <= uint256(d.proposedAt) + CHALLENGE_WINDOW) revert WindowOpen();
@@ -233,7 +246,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @notice AI 超时未提案，任何人可直接把案件升级到终局仲裁。
     /// @dev 防止机器人下线导致案件卡死。此路径无人质押保证金，
     ///      终局仲裁成本由托管合约的 lockedArbCost 覆盖。
-    function escalateUnproposed(uint256 id) external {
+    function escalateUnproposed(uint256 id) external nonReentrant {
         Dispute storage d = disputes[id];
         if (d.status != Status.Open) revert BadStatus();
         if (block.timestamp <= uint256(d.createdAt) + PROPOSAL_WINDOW) revert WindowOpen();
@@ -248,7 +261,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
     /// @inheritdoc IEscrowArbitrable
     /// @notice 终局仲裁方投递最终裁决。此处结算挑战保证金，并把裁决透传给托管合约。
-    function rule(uint256 finalDisputeID, uint256 ruling) external {
+    function rule(uint256 finalDisputeID, uint256 ruling) external nonReentrant {
         if (msg.sender != finalArbitrator) revert NotFinalArbitrator();
 
         uint256 id = finalToLocal[finalDisputeID];
@@ -301,14 +314,16 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         finalArbitrator = a;
     }
 
+    /// @notice 转移管理员。转给 address(0) 即永久放弃配置权。
     function transferAdmin(address a) external onlyAdmin {
+        emit AdminTransferred(admin, a);
         admin = a;
     }
 
     /// @notice 归集仲裁服务费收入。
     /// @dev 只能归集「余额 - 在途保证金」的部分，由合约强制，而非靠运营者自觉。
     ///      即便 admin 私钥泄露，在途的提案人/挑战者保证金也拿不走。
-    function sweep(address token, address to) external onlyAdmin returns (uint256 amount) {
+    function sweep(address token, address to) external onlyAdmin nonReentrant returns (uint256 amount) {
         if (to == address(0)) revert ZeroAddress();
         amount = _freeBalance(token);
         if (amount == 0) revert NothingToSweep();

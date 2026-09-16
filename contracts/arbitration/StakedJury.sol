@@ -223,6 +223,7 @@ contract StakedJury is IEscrowArbitrator {
     event RewardClaimed(uint256 indexed id, uint256 indexed slot, address indexed juror, uint256 amount);
     event DrawRescheduled(uint256 indexed id, uint64 newDrawBlock);
     event RandomnessSourceChanged(address indexed from, address indexed to);
+    event AdminTransferred(address indexed from, address indexed to);
     event RandomnessRequested(uint256 indexed id, uint256 indexed round, address indexed source);
     /// @notice 请求随机数失败。本轮降级为纯 blockhash 抽选，但争议照常受理。
     event RandomnessRequestFailed(uint256 indexed id, uint256 indexed round, address indexed source);
@@ -251,6 +252,19 @@ contract StakedJury is IEscrowArbitrator {
     error ZeroAddress();
     error TreeCorrupted();
     error JuryPoolFull();
+    error Reentrancy();
+
+    /// @dev 与 `Escrow` 同一份实现。本合约会把任意 ERC20 转进转出
+    ///      （币种由每笔交易决定，只要管理员给它配过价），而带转账回调的代币
+    ///      能在转账中途重新进入本合约。见 `appeal` 的注释。
+    bool private _entered;
+
+    modifier nonReentrant() {
+        if (_entered) revert Reentrancy();
+        _entered = true;
+        _;
+        _entered = false;
+    }
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -271,7 +285,7 @@ contract StakedJury is IEscrowArbitrator {
 
     // ============================================================ 质押管理
 
-    function stake(uint256 amount) external {
+    function stake(uint256 amount) external nonReentrant {
         stakeToken.safeTransferFrom(msg.sender, address(this), amount);
 
         uint256 id = jurorId[msg.sender];
@@ -291,7 +305,7 @@ contract StakedJury is IEscrowArbitrator {
     }
 
     /// @notice 提取质押。服务中被锁定的部分不可提取。
-    function unstake(uint256 amount) external {
+    function unstake(uint256 amount) external nonReentrant {
         uint256 id = jurorId[msg.sender];
         if (id == 0) revert NotJuror();
 
@@ -325,7 +339,7 @@ contract StakedJury is IEscrowArbitrator {
     ///      - 上层是 OptimisticArbitrator：币种是逐笔的，通过 extraData 传入；
     ///      - 上层直接是 Escrow（不经乐观层）：extraData 为空，回退到读取 msg.sender.token()。
     ///      两种接法都要支持，否则本合约只能挂在某一种上层下面。
-    function createDispute(uint256 choices, bytes calldata extraData) external returns (uint256 id) {
+    function createDispute(uint256 choices, bytes calldata extraData) external nonReentrant returns (uint256 id) {
         if (choices != 2) revert BadRuling();
         if (totalStake == 0) revert EmptyJuryPool();
 
@@ -432,7 +446,7 @@ contract StakedJury is IEscrowArbitrator {
     /// 知道 VRF 值并可尝试研磨区块哈希 —— 这正是今天的水平。VRF 后返回时，
     /// 预言机知道区块哈希，但 Chainlink VRF 的输出是可验证的：
     /// 它只能扣住不发（→ 超时 → 退回 blockhash），不能挑一个自己想要的值。
-    function drawJurors(uint256 id) external {
+    function drawJurors(uint256 id) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase != Phase.Pending) revert BadPhase();
         if (block.number <= c.drawBlock) revert TooEarly();
@@ -558,7 +572,7 @@ contract StakedJury is IEscrowArbitrator {
     /// 只来自他实际参与、并且能自己判断的那一场博弈。代价是：初审被推翻时，
     /// 初审的多数派仍然拿到了报酬 —— 这在账面上不好看，但上诉制度的前提
     /// 本来就是「前一轮**可能**是错的」，付钱给初审并不等于宣布初审是对的。
-    function tallyRound(uint256 id) external {
+    function tallyRound(uint256 id) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase != Phase.Reveal) revert BadPhase();
         if (block.timestamp <= c.revealDeadline) revert TooEarly();
@@ -681,7 +695,7 @@ contract StakedJury is IEscrowArbitrator {
     /// **为什么上诉不是免费的重摇。** 每一轮的陪审团都比上一轮大一倍多。
     /// 如果上一轮是对的，更大的一轮只会更对 —— 重摇并不提高翻盘概率，
     /// 却要付出成倍的费用。只有当上一轮确实处在边缘，上诉才划算。
-    function appeal(uint256 id) external {
+    function appeal(uint256 id) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase != Phase.Appealable) revert BadPhase();
         if (block.timestamp > c.appealDeadline) revert TooLate();
@@ -697,8 +711,14 @@ contract StakedJury is IEscrowArbitrator {
         // 上诉费当场付清，直接成为新一轮的报酬池。
         // 不做「赢了退还」：陪审员的工作是实打实发生的，而退款意味着
         // 这笔工钱最终得由别人出 —— 那个别人只能是对方当事人或协议本身。
-        c.feeToken.safeTransferFrom(msg.sender, address(this), cost);
-
+        //
+        // **先写完全部状态，最后才收钱**（checks-effects-interactions）。
+        // 顺序反过来会开一个真实的口子：收钱那一刻 `phase` 还是 Appealable、
+        // `rounds.length` 也还没变，带转账回调的代币可以在转账中途重新进入本函数，
+        // 两次调用各 push 一轮 —— 一次就把剩余的上诉轮全部耗光，
+        // **对方从此再也上诉不了**。而多出来的那一轮没有陪审员，
+        // 结案时它的报酬池还会原额退还给攻击者，等于零成本。
+        // 现在重入进来会撞上 `phase == Pending` 直接 revert，nonReentrant 是第二道保险。
         rounds[id].push(
             Round({
                 ruling: 0,
@@ -719,12 +739,14 @@ contract StakedJury is IEscrowArbitrator {
         c.rngSource = address(0);
         c.rngRequestedAt = 0;
 
+        c.feeToken.safeTransferFrom(msg.sender, address(this), cost);
+
         _requestRandomness(id, ri);
         emit Appealed(id, ri, msg.sender, cost, size);
     }
 
     /// @notice 上诉窗口届满无人上诉，裁决成为终局裁决。任何人可推动。
-    function finalize(uint256 id) external {
+    function finalize(uint256 id) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase != Phase.Appealable) revert BadPhase();
         if (block.timestamp <= c.appealDeadline) revert TooEarly();
@@ -753,7 +775,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 单轮彻底卡死的兜底：陪审员池为空导致长期无法抽选等。
     ///         超过 ROUND_TIMEOUT 后任何人可触发，让资金不至于永久锁死。
-    function timeoutCase(uint256 id) external {
+    function timeoutCase(uint256 id) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase == Phase.None || c.phase == Phase.Executed) revert BadPhase();
         if (block.timestamp < uint256(c.roundStartedAt) + ROUND_TIMEOUT) revert TooEarly();
@@ -850,7 +872,7 @@ contract StakedJury is IEscrowArbitrator {
     }
 
     /// @notice 领取本席位那一轮的报酬分成。与该轮多数一致的席位可领。
-    function claimReward(uint256 id, uint256 slot) external {
+    function claimReward(uint256 id, uint256 slot) external nonReentrant {
         Case storage c = cases[id];
         if (c.phase != Phase.Executed) revert BadPhase();
 
@@ -939,7 +961,10 @@ contract StakedJury is IEscrowArbitrator {
         costOf[token] = cost;
     }
 
+    /// @notice 转移管理员。转给 address(0) 即永久放弃配置权，
+    ///         此后仲裁费与随机数来源都冻结 —— 与工厂同一条终局去中心化路径。
     function transferAdmin(address a) external onlyAdmin {
+        emit AdminTransferred(admin, a);
         admin = a;
     }
 
