@@ -8,7 +8,11 @@ import { buildEvidenceItem } from "./evidence.js";
 const ARBITRATOR_ABI = [
   "event DisputeCreated(uint256 indexed id, address indexed arbitrable, address token, uint256 bond, uint256 value)",
   "event RulingProposed(uint256 indexed id, uint8 ruling, address indexed proposer)",
-  "function disputes(uint256) view returns (address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value)",
+  // 合约里 disputes 是「私有存储 + 显式返回 memory 结构体」，所以这里必须按
+  // 结构体声明。写成一串扁平字段**碰巧也能解码** —— Dispute 目前全是定长类型，
+  // ABI 编码与逐个返回完全一致。但哪天结构体里加一个 string，编码就分叉，
+  // 而且是静默地解出错误的值。不靠这种巧合。
+  "function disputes(uint256) view returns (tuple(address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value, address dealBuyer, address dealSeller) d)",
   "function propose(uint256 id, uint8 ruling)",
   "function bondOf(address token) view returns (uint256)",
   "function proposer() view returns (address)",
@@ -50,7 +54,7 @@ export function makeClients() {
 
 /// 汇总一个争议所需的全部链上事实与证据。
 export async function loadCase(id, { provider, arbitrator }) {
-  const d = await arbitrator.disputes(id);
+  const d = (await arbitrator.disputes(id)).d;
   if (d.status !== BigInt(Status.Open) && Number(d.status) !== Status.Open) {
     return { id, status: Number(d.status), skip: `状态为 ${Number(d.status)}，非待提案` };
   }
