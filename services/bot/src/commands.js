@@ -11,6 +11,9 @@ import {
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toEip681,
 } from "./txlink.js";
+import {
+  dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
+} from "./arbitration.js";
 
 const provider = makeProvider();
 
@@ -264,6 +267,17 @@ async function finalizeNew(chatId, userId) {
   const seller = d.role === "seller" ? u.address : d.counterparty;
   const termsHash = hashTerms(d.terms);
 
+  // 单笔案值上限是工厂上的硬闸。必须在这里拦住 —— 否则用户会在自己钱包里
+  // 撞上一个看不懂的 revert，钱没损失，但他不知道发生了什么。
+  const value = dealValue({ price, buyerBond: bond, sellerBond: bond });
+  const arb = await loadArbitration(d.token, config.escrowFactory, provider);
+  const cap = capVerdict({ value, cap: arb.cap });
+  if (!cap.ok) {
+    await sendMessage(chatId, renderCapRejection({ value, cap: arb.cap, info }).join("\n"));
+    session.clearFlow(userId);
+    return;
+  }
+
   const tx = buildCreateDeal({
     token: d.token, buyer, seller,
     price, buyerBond: bond, sellerBond: bond,
@@ -282,6 +296,8 @@ async function finalizeNew(chatId, userId) {
     `交付期: ${d.deliveryHours} 小时`,
     `验收期: ${d.inspectionHours} 小时`,
     `条款哈希: \`${esc(termsHash)}\``,
+    "",
+    ...renderArbitrationNotes({ value, cap: arb.cap, coverage: arb.coverage, info }),
     "",
     "*请自行保存条款原文*",
     esc("链上只存哈希。争议时你需要提交原文，哈希对得上才会被认定为真本。"),
