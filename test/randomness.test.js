@@ -14,13 +14,13 @@ const RANDOMNESS_TIMEOUT = 2 * 3600;
 const Phase = { None: 0n, Pending: 1n, Commit: 2n, Reveal: 3n, Executed: 4n };
 
 describe("陪审团抽选的随机数", function () {
-  let owner, arbitrable, jurorSigners;
+  let owner, arbitrable, dealBuyer, dealSeller, jurorSigners;
   let token, jury, coordinator, source;
 
   beforeEach(async function () {
     const signers = await ethers.getSigners();
-    [owner, arbitrable] = signers;
-    jurorSigners = signers.slice(2, 12);
+    [owner, arbitrable, dealBuyer, dealSeller] = signers;
+    jurorSigners = signers.slice(4, 14);
 
     token = await (await ethers.getContractFactory("MockERC20")).deploy();
     jury = await (await ethers.getContractFactory("StakedJury")).deploy(
@@ -57,7 +57,8 @@ describe("陪审团抽选的随机数", function () {
   const CASE_VALUE = U(3000);
   const extraData = async () =>
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ["address", "uint256"], [await token.getAddress(), CASE_VALUE]
+      ["address", "uint256", "address", "address"],
+      [await token.getAddress(), CASE_VALUE, dealBuyer.address, dealSeller.address]
     );
 
   async function newCase() {

@@ -34,6 +34,10 @@ const APPEAL_WINDOW = 2 * 24 * 3600;
 const ROUND_TIMEOUT = 10 * 24 * 3600;
 const DISPUTE_TIMEOUT = 45 * 24 * 3600;
 
+// 案值 = 货款 + 双方押金 = 3000；拖延押金 = 2%
+const CASE_VALUE = PRICE + BOND + BOND;
+const DELAY_BOND = (CASE_VALUE * 200n) / 10000n;
+
 const Phase = { None: 0n, Pending: 1n, Commit: 2n, Reveal: 3n, Appealable: 4n, Executed: 5n };
 
 const commitment = (ruling, salt, juror) =>
@@ -195,12 +199,15 @@ describe("陪审团上诉轮", function () {
 
       const sellerBefore = await token.balanceOf(seller.address);
       await time.increase(APPEAL_WINDOW + 1);
-      await jury.finalize(id);
+      await expect(jury.finalize(id))
+        .to.emit(jury, "DelayBondSettled")
+        .withArgs(id, 1, seller.address, DELAY_BOND, true);
 
       expect((await jury.cases(id)).ruling).to.equal(2n, "终局裁决取最后一轮");
       const fee = (PRICE * FEE_BPS) / 10000n;
+      // 上诉对了，拖延押金原额退回 —— 纠错本身不该收费，否则没人愿意纠错
       expect(await token.balanceOf(seller.address) - sellerBefore)
-        .to.equal(PRICE - fee + BOND + (BOND - ARB_COST), "应按卖家胜结算");
+        .to.equal(PRICE - fee + BOND + (BOND - ARB_COST) + DELAY_BOND, "应按卖家胜结算，并退还拖延押金");
       expect(await deal.state()).to.equal(5n);
     });
 
@@ -218,6 +225,115 @@ describe("陪审团上诉轮", function () {
       expect((await jury.cases(id)).phase).to.equal(Phase.Executed, "第三轮结轮即终局");
       expect(await jury.appealCost(id)).to.equal(0n, "已无下一轮可上诉");
       await expect(jury.connect(buyer).appeal(id)).to.be.revertedWithCustomError(jury, "BadPhase");
+    });
+  });
+
+  // ==================================================== 拖延押金
+
+  describe("上诉治不了拖延，所以另收一笔押金", function () {
+    // 上诉费本身是付给陪审员的工钱，惩罚不了拖延 —— 那笔钱进的是陪审员口袋，
+    // 被多锁一个轮次的那一方一分钱补偿都没有。败诉方即使明知自己会再输一次，
+    // 也可以靠上诉把对方的钱多压七天。所以另收一笔按案值计的押金：
+    // 推翻原判就退还，维持原判就赔给被拖住的那一方。
+
+    it("发起上诉要付的总额 = 陪审员报酬 + 拖延押金", async function () {
+      const { id } = await disputedDeal();
+      await runRound(id, allVoting(1));
+
+      expect(await jury.appealCost(id)).to.equal(U(140), "陪审员报酬按席位算");
+      expect(await jury.appealDelayBond(id)).to.equal(DELAY_BOND, "拖延押金按案值算");
+      expect(await jury.appealTotal(id)).to.equal(U(140) + DELAY_BOND);
+    });
+
+    it("拖延押金随案值走，与陪审团开几个人无关", async function () {
+      // 它补偿的是「对方的钱被多锁了一个轮次」，那个损失取决于压了多少钱。
+      const small = await (await ethers.getContractFactory("EscrowFactory")).deploy(
+        await (await ethers.getContractFactory("Escrow")).deploy().then((x) => x.getAddress()),
+        await jury.getAddress(), await vault.getAddress(), FEE_BPS, owner.address
+      );
+      const rc = await (await small.connect(seller).createDeal(
+        await token.getAddress(), buyer.address, seller.address,
+        U(100), U(100), U(100), 3 * 24 * 3600, 2 * 24 * 3600, ethers.ZeroHash
+      )).wait();
+      const deal = await ethers.getContractAt(
+        "Escrow", rc.logs.find((l) => l.fragment?.name === "DealCreated").args.deal
+      );
+      await token.connect(seller).approve(await deal.getAddress(), U(100));
+      await deal.connect(seller).depositSeller();
+      await token.connect(buyer).approve(await deal.getAddress(), U(200));
+      await deal.connect(buyer).depositBuyer();
+      await deal.connect(seller).markDelivered("ipfs://x");
+      await deal.connect(buyer).raiseDispute("ipfs://e");
+      const id = Number(await deal.disputeID());
+
+      await runRound(id, allVoting(1));
+      expect(await jury.appealCost(id)).to.equal(U(140), "陪审员报酬没变");
+      expect(await jury.appealDelayBond(id)).to.equal(U(6), "案值 300 的 2%");
+    });
+
+    it("败诉方明知会输还上诉：原判被维持，押金赔给被他拖住的那一方", async function () {
+      const { id } = await disputedDeal();
+      await runRound(id, allVoting(1)); // 初审：买家胜
+
+      const sellerBefore = await token.balanceOf(seller.address);
+      await jury.connect(seller).appeal(id);
+      const spent = sellerBefore - (await token.balanceOf(seller.address));
+      expect(spent).to.equal(U(140) + DELAY_BOND, "上诉当场付清两笔");
+
+      await runRound(id, allVoting(1)); // 上诉轮：还是买家胜
+
+      const buyerBefore = await token.balanceOf(buyer.address);
+      await time.increase(APPEAL_WINDOW + 1);
+      await expect(jury.finalize(id))
+        .to.emit(jury, "DelayBondSettled")
+        .withArgs(id, 1, buyer.address, DELAY_BOND, false);
+
+      expect(await token.balanceOf(buyer.address) - buyerBefore).to.equal(
+        PRICE + BOND + BOND - ARB_COST + DELAY_BOND,
+        "被多锁一个轮次的一方，除了本来该得的，还拿到拖延补偿"
+      );
+    });
+
+    it("第三方替人上诉、上诉又没成，押金同样赔给胜诉方而不是退给他", async function () {
+      const { id } = await disputedDeal();
+      await runRound(id, allVoting(1));
+
+      await jury.connect(outsider).appeal(id);
+      await runRound(id, allVoting(1)); // 维持原判
+
+      await time.increase(APPEAL_WINDOW + 1);
+      await expect(jury.finalize(id))
+        .to.emit(jury, "DelayBondSettled")
+        .withArgs(id, 1, buyer.address, DELAY_BOND, false);
+    });
+
+    it("终局是拒裁时退还上诉人 —— 没有「被拖延的赢家」可赔", async function () {
+      const { id } = await disputedDeal();
+
+      // 初审无人揭示 → 本轮无结论
+      await draw(id);
+      await time.increase(COMMIT_WINDOW + 1);
+      await jury.startReveal(id);
+      await time.increase(REVEAL_WINDOW + 1);
+      await jury.tallyRound(id);
+
+      const before = await token.balanceOf(outsider.address);
+      await jury.connect(outsider).appeal(id);
+
+      // 上诉轮同样无人揭示 → 终局拒裁
+      await draw(id);
+      await time.increase(COMMIT_WINDOW + 1);
+      await jury.startReveal(id);
+      await time.increase(REVEAL_WINDOW + 1);
+      await jury.tallyRound(id);
+
+      await time.increase(APPEAL_WINDOW + 1);
+      await expect(jury.finalize(id))
+        .to.emit(jury, "DelayBondSettled")
+        .withArgs(id, 1, outsider.address, DELAY_BOND, false);
+
+      expect((await jury.cases(id)).ruling).to.equal(0n);
+      expect(await token.balanceOf(outsider.address)).to.equal(before, "两笔钱都退回");
     });
   });
 
@@ -299,11 +415,19 @@ describe("陪审团上诉轮", function () {
       await time.increase(REVEAL_WINDOW + 1);
       await jury.tallyRound(id); // 第二轮，之后还能再上诉 → 进入 Appealable
 
+      const buyerBefore = await token.balanceOf(buyer.address);
       await time.increase(APPEAL_WINDOW + 1);
-      await expect(jury.finalize(id))
-        .to.emit(jury, "AppealFeeRefunded").withArgs(id, 1, outsider.address, U(140));
+      const tx = jury.finalize(id);
+      await expect(tx).to.emit(jury, "AppealFeeRefunded").withArgs(id, 1, outsider.address, U(140));
+      await expect(tx).to.emit(jury, "DelayBondSettled")
+        .withArgs(id, 1, buyer.address, DELAY_BOND, false);
 
-      expect(await token.balanceOf(outsider.address)).to.equal(paid, "上诉费应原额退回");
+      // 陪审员一个都没出工，那笔工钱退还；但拖延押金不退 ——
+      // 他确实把买家的钱又多锁了一个轮次，这笔要赔。
+      expect(paid - (await token.balanceOf(outsider.address)))
+        .to.equal(DELAY_BOND, "只损失拖延押金，陪审费原额退回");
+      expect(await token.balanceOf(buyer.address) - buyerBefore)
+        .to.equal(PRICE + BOND + BOND - ARB_COST + DELAY_BOND, "被拖延的一方拿到补偿");
     });
   });
 
@@ -374,8 +498,9 @@ describe("陪审团上诉轮", function () {
       await jury.finalize(id);
 
       expect((await jury.cases(id)).ruling).to.equal(1n, "应退回初审的裁决");
+      // 沉默不但换不来平局，拖延押金还要赔给被拖住的买家
       expect(await token.balanceOf(buyer.address) - buyerBefore)
-        .to.equal(PRICE + BOND + BOND - ARB_COST, "仍按买家胜结算，沉默没有换来平局");
+        .to.equal(PRICE + BOND + BOND - ARB_COST + DELAY_BOND, "仍按买家胜结算，并拿到拖延补偿");
       expect(await deal.state()).to.equal(5n);
     });
 

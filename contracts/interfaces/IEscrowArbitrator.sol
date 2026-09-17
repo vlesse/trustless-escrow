@@ -36,6 +36,10 @@ interface IEscrowTerms {
 
     /// @notice 本笔交易中「可以被裁决改变归属」的总额。
     function disputeValue() external view returns (uint256);
+
+    /// @notice 交易双方。仲裁层需要知道「被拖延的是谁」，才谈得上补偿他。
+    function buyer() external view returns (address);
+    function seller() external view returns (address);
 }
 
 /// @title IEscrowArbitrable

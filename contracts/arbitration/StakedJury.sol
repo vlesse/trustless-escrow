@@ -90,6 +90,17 @@ contract StakedJury is IEscrowArbitrator {
     ///      （每一轮都要占掉托管合约 DISPUTE_TIMEOUT 预算里的一段）。
     uint64 public constant APPEAL_WINDOW = 2 days;
 
+    /// @notice 上诉时额外收取的「拖延押金」，按案值的万分比计。
+    ///
+    /// @dev 上诉费本身是付给陪审员的工钱，它惩罚不了拖延 —— 那笔钱进的是
+    ///      陪审员口袋，**被多锁一个轮次的那一方一分钱补偿都没有**。
+    ///      败诉方即使明知自己会再输一次，也可以靠上诉把对方的钱多压七天。
+    ///
+    ///      所以上诉费之外另收一笔押金：推翻原判就原额退还（你是对的，上诉免费），
+    ///      维持原判就赔给裁决所favor的那一方（你拖了人家，赔钱）。
+    ///      这和乐观层的 challenge 完全同构 —— 全协议一以贯之的「谁错谁赔给对方」。
+    uint256 public constant DELAY_BOND_BPS = 200; // 2%
+
     /// @notice 包含第一轮在内的最大轮数。3 = 初审 + 两次上诉。
     ///
     /// @dev 上限不是拍脑袋定的，是被托管合约的 `DISPUTE_TIMEOUT` 约束死的：
@@ -156,6 +167,7 @@ contract StakedJury is IEscrowArbitrator {
         address appellant;    // 发起本轮上诉的人；第一轮为 0
         uint256 coherentCount;
         uint256 rewardPool;   // 本轮报酬，以 feeToken 计价
+        uint256 delayBond;    // 本轮上诉人另付的拖延押金；第一轮为 0
     }
 
     struct Case {
@@ -176,6 +188,9 @@ contract StakedJury is IEscrowArbitrator {
         ///      不影响任何已经开始的轮次。否则「看到一个不想输的案子再换来源」
         ///      就成了一个现成的攻击路径。
         address rngSource;
+        /// @notice 受理时快照的交易双方，用于把拖延押金赔给被拖住的那一方。
+        address dealBuyer;
+        address dealSeller;
         /// @notice 受理时快照的案值 —— 一个被买通的裁决最多能挪动多少钱。
         /// @dev 陪审团抗贿赂的能力来自「过半席位会被罚没的总额」，那是固定参数；
         ///      案值却是浮动的。两者不挂钩，案值一旦超过买通成本，
@@ -231,6 +246,10 @@ contract StakedJury is IEscrowArbitrator {
     /// @notice 裁决投递失败。案件照常结案、质押照常解锁，但本案拿不到服务费。
     event RulingDeliveryFailed(uint256 indexed id, address indexed arbitrable);
     event AppealFeeRefunded(uint256 indexed id, uint256 indexed round, address indexed to, uint256 amount);
+    /// @notice 拖延押金的去向。overturned=true 表示上诉推翻了原判，押金退还发起人。
+    event DelayBondSettled(
+        uint256 indexed id, uint256 indexed round, address indexed to, uint256 amount, bool overturned
+    );
     event FeesRecycled(uint256 indexed id, address indexed token, uint256 amount);
     event JurorSlashed(uint256 indexed id, address indexed juror, uint256 amount, string reason);
     event RewardClaimed(uint256 indexed id, uint256 indexed slot, address indexed juror, uint256 amount);
@@ -365,12 +384,12 @@ contract StakedJury is IEscrowArbitrator {
     function createDispute(uint256 choices, bytes calldata extraData) external nonReentrant returns (uint256 id) {
         if (choices != 2) revert BadRuling();
 
-        (address feeToken, uint256 value) = _terms(extraData);
+        (address feeToken, uint256 value, address b, address sl) = _terms(extraData);
         if (feeToken == address(0)) revert ZeroAddress();
         if (costOf[feeToken] == 0) revert CostNotConfigured();
 
         id = nextCaseID++;
-        _openCase(id, feeToken, value);
+        _openCase(id, feeToken, value, b, sl);
 
         rounds[id].push(
             Round({
@@ -379,7 +398,8 @@ contract StakedJury is IEscrowArbitrator {
                 size: uint32(jurySize),
                 appellant: address(0),
                 coherentCount: 0,
-                rewardPool: 0
+                rewardPool: 0,
+                delayBond: 0
             })
         );
 
@@ -393,22 +413,30 @@ contract StakedJury is IEscrowArbitrator {
     ///
     ///      刻意不给「取不到案值就当 0」留后路 —— 那会让后续所有按案值做的
     ///      保护静默失效，而且没有任何人会发现。取不到就响亮地失败。
-    function _terms(bytes calldata extraData) private view returns (address feeToken, uint256 value) {
-        if (extraData.length >= 64) {
-            (feeToken, value) = abi.decode(extraData, (address, uint256));
+    function _terms(bytes calldata extraData)
+        private
+        view
+        returns (address feeToken, uint256 value, address b, address sl)
+    {
+        if (extraData.length >= 128) {
+            (feeToken, value, b, sl) = abi.decode(extraData, (address, uint256, address, address));
         } else {
             feeToken = IEscrowTerms(msg.sender).token();
             value = IEscrowTerms(msg.sender).disputeValue();
+            b = IEscrowTerms(msg.sender).buyer();
+            sl = IEscrowTerms(msg.sender).seller();
         }
     }
 
     /// @dev 逐字段写入而不是构造整个结构体字面量：字段变多之后
     ///      `createDispute` 的局部变量会撞上 EVM 的栈深度上限。
     ///      `id` 来自自增计数器，槽位必然是全新的，所以为 0 的字段不必显式写。
-    function _openCase(uint256 id, address feeToken, uint256 value) private {
+    function _openCase(uint256 id, address feeToken, uint256 value, address b, address sl) private {
         Case storage c = _cases[id];
         c.arbitrable = msg.sender;
         c.feeToken = feeToken;
+        c.dealBuyer = b;
+        c.dealSeller = sl;
         c.phase = Phase.Pending;
         c.drawBlock = uint64(block.number) + DRAW_DELAY;
         c.roundStartedAt = uint64(block.timestamp);
@@ -710,6 +738,20 @@ contract StakedJury is IEscrowArbitrator {
         return (_cases[id].baseCost * _nextSize(rounds[id][n - 1].size)) / jurySize;
     }
 
+    /// @notice 下一轮上诉要另付的拖延押金，以 feeToken 计价。不可上诉时返回 0。
+    /// @dev 按案值计，而不是按席位计 —— 它补偿的是「对方的钱被多锁了一个轮次」，
+    ///      那个损失的大小取决于压了多少钱，和陪审团开几个人无关。
+    function appealDelayBond(uint256 id) public view returns (uint256) {
+        uint256 n = rounds[id].length;
+        if (n == 0 || n >= MAX_ROUNDS) return 0;
+        return (_cases[id].value * DELAY_BOND_BPS) / 10_000;
+    }
+
+    /// @notice 发起下一轮上诉实际要付的总额 = 陪审员报酬 + 拖延押金。
+    function appealTotal(uint256 id) external view returns (uint256) {
+        return appealCost(id) + appealDelayBond(id);
+    }
+
     /// @dev 下一轮席位数：翻倍加一。保持奇数（避免平票），
     ///      并让「买通多数」的成本随轮次指数上升。
     function _nextSize(uint256 size) private pure returns (uint256) {
@@ -745,6 +787,7 @@ contract StakedJury is IEscrowArbitrator {
 
         uint256 size = _nextSize(rounds[id][ri - 1].size);
         uint256 cost = appealCost(id);
+        uint256 delayBond = appealDelayBond(id);
 
         // 上诉费当场付清，直接成为新一轮的报酬池。
         // 不做「赢了退还」：陪审员的工作是实打实发生的，而退款意味着
@@ -764,7 +807,8 @@ contract StakedJury is IEscrowArbitrator {
                 size: uint32(size),
                 appellant: msg.sender,
                 coherentCount: 0,
-                rewardPool: cost
+                rewardPool: cost,
+                delayBond: delayBond
             })
         );
 
@@ -777,7 +821,7 @@ contract StakedJury is IEscrowArbitrator {
         c.rngSource = address(0);
         c.rngRequestedAt = 0;
 
-        c.feeToken.safeTransferFrom(msg.sender, address(this), cost);
+        c.feeToken.safeTransferFrom(msg.sender, address(this), cost + delayBond);
 
         _requestRandomness(id, ri);
         emit Appealed(id, ri, msg.sender, cost, size);
@@ -856,6 +900,7 @@ contract StakedJury is IEscrowArbitrator {
         rounds[id][0].rewardPool += feeReceived + carry;
 
         _settlePools(id);
+        _settleDelayBonds(id);
         emit CaseFinalized(id, ruling, rounds[id].length, delivered);
     }
 
@@ -889,6 +934,51 @@ contract StakedJury is IEscrowArbitrator {
                 emit FeesRecycled(id, c.feeToken, amount);
             }
         }
+    }
+
+    /// @dev 结算各上诉轮的拖延押金。
+    ///
+    ///      判定标准是「这一轮有没有真的改变结论」：
+    ///        - 推翻了前面的裁决 → 原额退还发起人。**上诉对了应该是免费的**，
+    ///          否则纠错本身要收费，没人愿意纠错。
+    ///        - 维持原判 → 赔给终局裁决所判给的那一方。他的钱因为这次上诉
+    ///          被多锁了一个轮次，而那不是他的过错。
+    ///        - 终局是拒裁（无人胜出）→ 退还发起人。没有「被拖延的赢家」可赔。
+    function _settleDelayBonds(uint256 id) private {
+        Case storage c = _cases[id];
+        uint256 n = rounds[id].length;
+
+        for (uint256 i = 1; i < n; i++) {
+            Round storage r = rounds[id][i];
+            uint256 amount = r.delayBond;
+            if (amount == 0) continue;
+            r.delayBond = 0;
+
+            // 与「本轮之前最后一个真正出了结论的轮次」比对。
+            // 不能直接看上一轮 —— 上一轮可能是集体沉默的 0，那不是一个结论。
+            uint8 prev = _rulingBefore(id, i);
+            bool overturned = r.ruling != 0 && r.ruling != prev;
+
+            address to;
+            if (overturned || c.ruling == 0) {
+                to = r.appellant;
+            } else {
+                to = c.ruling == 1 ? c.dealBuyer : c.dealSeller;
+                if (to == address(0)) to = r.appellant; // 取不到当事人时不没收，退回
+            }
+
+            c.feeToken.safeTransfer(to, amount);
+            emit DelayBondSettled(id, i, to, amount, overturned);
+        }
+    }
+
+    /// @dev 第 `r` 轮之前，最后一个真正出了结论的轮次的裁决；都没有则为 0。
+    function _rulingBefore(uint256 id, uint256 r) private view returns (uint8) {
+        for (uint256 i = r; i > 0; i--) {
+            uint8 x = rounds[id][i - 1].ruling;
+            if (x != 0) return x;
+        }
+        return 0;
     }
 
     /// @dev 投递裁决，但**不允许上层的失败把本合约拖下水**。

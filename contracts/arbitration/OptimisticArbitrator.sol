@@ -58,6 +58,8 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         uint256 bond;         // 单边保证金金额（提案人与挑战者各质押这么多）
         uint256 finalCost;    // 受理时快照的终局仲裁成本，防止中途被抬价
         uint256 value;        // 受理时快照的案值，透传给终局仲裁方
+        address dealBuyer;    // 受理时快照的双方，透传给终局仲裁方用于补偿被拖延的一方
+        address dealSeller;
     }
 
     /// @notice 交易实例注册表（EscrowFactory），用于校验争议来源合法。
@@ -83,7 +85,13 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     ///      那等于在仲裁层重新开了一个后门，与整个协议的前提矛盾。
     mapping(address => uint256) public lockedBonds;
 
-    mapping(uint256 => Dispute) public disputes;
+    /// @dev 私有 + 显式 getter：字段变多之后自动 getter 的返回值摊不进栈。
+    ///      与 StakedJury.cases 同一处理。
+    mapping(uint256 => Dispute) private _disputes;
+
+    function disputes(uint256 id) external view returns (Dispute memory) {
+        return _disputes[id];
+    }
     uint256 public nextDisputeID = 1;
 
     /// @notice 终局仲裁方的 disputeID → 本合约的 disputeID
@@ -168,7 +176,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         // 逐字段写入而不是构造整个结构体字面量：字段变多之后
         // 本函数的局部变量会撞上 EVM 的栈深度上限。
         // id 来自自增计数器，槽位必然全新，所以为 0 的字段不必显式写。
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         d.arbitrable = msg.sender;
         d.token = token;
         d.status = Status.Open;
@@ -176,13 +184,15 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         d.bond = bondOf[token];
         d.finalCost = finalCost;
         d.value = value;
+        d.dealBuyer = IEscrowTerms(msg.sender).buyer();
+        d.dealSeller = IEscrowTerms(msg.sender).seller();
 
         emit DisputeCreated(id, msg.sender, token, bondOf[token], value);
     }
 
     /// @inheritdoc IEscrowArbitrator
     function currentRuling(uint256 id) external view returns (uint256) {
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         return d.status == Status.Proposed || d.status == Status.Executed ? d.proposedRuling : 0;
     }
 
@@ -192,7 +202,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @dev 保证金让机器人对自己的结论有实际风险敞口。
     function propose(uint256 id, uint8 ruling) external nonReentrant {
         if (msg.sender != proposer) revert NotProposer();
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         if (d.status != Status.Open) revert BadStatus();
         if (block.timestamp > uint256(d.createdAt) + PROPOSAL_WINDOW) revert WindowClosed();
         if (ruling > 2) revert BadRuling();
@@ -210,7 +220,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @dev 刻意不限制调用者身份 —— 任何旁观者都可以推翻一个明显的错判并获利。
     ///      这是让机器人「不成为单点」的关键：纠错权是开放的。
     function challenge(uint256 id) external nonReentrant {
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         if (d.status != Status.Proposed) revert BadStatus();
         if (block.timestamp > uint256(d.proposedAt) + CHALLENGE_WINDOW) revert WindowClosed();
 
@@ -219,7 +229,10 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         lockedBonds[d.token] += d.bond;
         d.token.safeTransferFrom(msg.sender, address(this), d.bond);
 
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token, d.value));
+        uint256 finalID =
+            IEscrowArbitrator(finalArbitrator).createDispute(
+                2, abi.encode(d.token, d.value, d.dealBuyer, d.dealSeller)
+            );
         finalToLocal[finalID] = id;
 
         emit Challenged(id, msg.sender, finalID);
@@ -227,7 +240,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
     /// @notice 挑战窗口届满无人挑战，默认裁决生效。任何人可触发。
     function execute(uint256 id) external nonReentrant {
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         if (d.status != Status.Proposed) revert BadStatus();
         if (block.timestamp <= uint256(d.proposedAt) + CHALLENGE_WINDOW) revert WindowOpen();
 
@@ -247,12 +260,15 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @dev 防止机器人下线导致案件卡死。此路径无人质押保证金，
     ///      终局仲裁成本由托管合约的 lockedArbCost 覆盖。
     function escalateUnproposed(uint256 id) external nonReentrant {
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         if (d.status != Status.Open) revert BadStatus();
         if (block.timestamp <= uint256(d.createdAt) + PROPOSAL_WINDOW) revert WindowOpen();
 
         d.status = Status.Escalated;
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token, d.value));
+        uint256 finalID =
+            IEscrowArbitrator(finalArbitrator).createDispute(
+                2, abi.encode(d.token, d.value, d.dealBuyer, d.dealSeller)
+            );
         finalToLocal[finalID] = id;
         emit Challenged(id, address(0), finalID);
     }
@@ -265,7 +281,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         if (msg.sender != finalArbitrator) revert NotFinalArbitrator();
 
         uint256 id = finalToLocal[finalDisputeID];
-        Dispute storage d = disputes[id];
+        Dispute storage d = _disputes[id];
         if (d.status != Status.Escalated) revert BadStatus();
         if (ruling > 2) revert BadRuling();
 
