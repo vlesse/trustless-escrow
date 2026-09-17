@@ -67,6 +67,7 @@ contract EscrowFactory {
     event ConfigProposed(address arbitrator, address feeVault, uint16 feeBps, uint64 eta);
     event ConfigApplied(address arbitrator, address feeVault, uint16 feeBps);
     event AdminTransferred(address indexed from, address indexed to);
+    event MaxDealValueChanged(address indexed token, uint256 from, uint256 to);
 
     error NotAdmin();
     error ZeroAddress();
@@ -74,6 +75,7 @@ contract EscrowFactory {
     error NoPendingConfig();
     error TimelockNotElapsed();
     error SamePartyBothSides();
+    error DealValueTooHigh();
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -94,6 +96,23 @@ contract EscrowFactory {
         admin = _admin;
     }
 
+    /// @notice 单笔交易的案值上限，按币种计。0 表示不限制。
+    ///
+    /// @dev **这是运营层面的风控，不是密码学保证。** 在没有第三方审计预算的
+    ///      阶段，它是唯一能真实封住下行的东西：上线初期定得很低，
+    ///      跑上一段时间没出事再往上放，最坏损失始终有个硬顶。
+    ///
+    ///      它只影响**新交易**：调低不会动到任何已存在的交易，也碰不到任何资金。
+    ///      管理员能用它把新单卡死 —— 但那只是「停止服务」，
+    ///      与「挪用资金」是两回事，后者在本协议里不存在任何路径。
+    mapping(address => uint256) public maxDealValue;
+
+    /// @notice 设置单笔案值上限。0 = 不限制。
+    function setMaxDealValue(address token, uint256 cap) external onlyAdmin {
+        emit MaxDealValueChanged(token, maxDealValue[token], cap);
+        maxDealValue[token] = cap;
+    }
+
     // ------------------------------------------------------------ 创建交易
 
     /// @notice 创建一笔交易。买卖双方任一方都可以发起，发起本身不锁定任何资金。
@@ -111,6 +130,12 @@ contract EscrowFactory {
         bytes32 termsHash
     ) external returns (address deal) {
         if (buyer == seller) revert SamePartyBothSides();
+
+        // 案值 = 货款 + 双方押金，与 Escrow.disputeValue() 同一口径。
+        // 在**入金之前**就卡住，而不是等到起争议时才拦 —— 那时候钱已经锁进去了，
+        // 拦住等于剥夺当事人提起争议的权利（同样的错误在陪审团那边犯过一次）。
+        uint256 cap = maxDealValue[token];
+        if (cap != 0 && price + buyerBond + sellerBond > cap) revert DealValueTooHigh();
 
         deal = Clones.clone(implementation);
 

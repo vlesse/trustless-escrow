@@ -1098,6 +1098,23 @@ contract StakedJury is IEscrowArbitrator {
 
     // ============================================================== 只读
 
+    /// @notice 买通本陪审团过半席位，行贿者至少要覆盖的金额。
+    ///
+    /// @dev 拿它和案值比，是判断「这个案子会不会被买」最直接的一个数。
+    ///      合约**不拿它拦人**，只把它摆出来，理由有二：
+    ///
+    ///      一、它是个很保守的下界。投票是先交哈希后统一揭晓，
+    ///      **贿赂因此是不可执行的** —— 陪审员完全可以收了钱照样诚实投票，
+    ///      行贿者事后毫无办法。所以真实的安全倍数比这个数高得多，
+    ///      但高多少没人知道，把一个拍脑袋的系数写进共识规则是错的。
+    ///
+    ///      二、真要设上限，那道闸应该开在**入金之前**（见 EscrowFactory
+    ///      的 maxDealValue），而不是等钱锁进去了再在争议环节拦 ——
+    ///      那等于剥夺当事人提起争议的权利。
+    function juryCoverage() public view returns (uint256) {
+        return ((jurySize + 1) / 2) * stakePerVote;
+    }
+
     function jurorCount() external view returns (uint256) {
         return jurors.length;
     }
