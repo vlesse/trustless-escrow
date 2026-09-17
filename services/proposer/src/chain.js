@@ -2,10 +2,13 @@ import { ethers } from "ethers";
 import { config } from "./config.js";
 import { buildEvidenceItem } from "./evidence.js";
 
+/// 这份 ABI 是手写的。事件签名一旦与链上不一致，topic 就对不上，
+/// **提案人会静默地再也收不到任何争议** —— 不报错，只是不干活了。
+/// test/abi.test.js 拿编译产物逐条对照，别把它删了。
 const ARBITRATOR_ABI = [
-  "event DisputeCreated(uint256 indexed id, address indexed arbitrable, address token, uint256 bond)",
+  "event DisputeCreated(uint256 indexed id, address indexed arbitrable, address token, uint256 bond, uint256 value)",
   "event RulingProposed(uint256 indexed id, uint8 ruling, address indexed proposer)",
-  "function disputes(uint256) view returns (address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost)",
+  "function disputes(uint256) view returns (address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value)",
   "function propose(uint256 id, uint8 ruling)",
   "function bondOf(address token) view returns (uint256)",
   "function proposer() view returns (address)",

@@ -393,7 +393,7 @@ describe("陪审团上诉轮", function () {
       expect((await jury.rounds(id, 1)).rewardPool).to.equal(U(140));
     });
 
-    it("陪审员池被罚没清空后不放人上诉：那一轮注定开不起来，只会白等一个超时", async function () {
+    it("陪审员池被罚没清空后仍然可以上诉 —— 等有人来质押再抽签", async function () {
       // 需要一个「一次罚没就能清空」的陪审团：最低质押 = 每席罚没额，且只有一名陪审员。
       // 这不是人为构造的死角 —— 集体装死正是会把小池子直接罚到 0 的那种情形。
       const tiny = await (await ethers.getContractFactory("StakedJury")).deploy(
@@ -432,9 +432,23 @@ describe("陪审团上诉轮", function () {
       await tiny.tallyRound(id);
       expect(await tiny.totalStake()).to.equal(0n, "池子已被罚空");
 
+      // 池子空了不该剥夺上诉权 —— 和「池子空了不该剥夺争议权」同一个道理。
+      // 上诉照常受理，只是抽不了签，要等人来。
       await token.connect(seller).approve(await tiny.getAddress(), U(100000));
-      await expect(tiny.connect(seller).appeal(id))
-        .to.be.revertedWithCustomError(tiny, "EmptyJuryPool");
+      await tiny.connect(seller).appeal(id);
+      expect(await tiny.roundCount(id)).to.equal(2n);
+
+      await mine(DRAW_DELAY + 1);
+      await expect(tiny.drawJurors(id)).to.be.revertedWithCustomError(tiny, "EmptyJuryPool");
+
+      // 新人进场，上诉轮就开得起来了
+      for (const j of jurorSigners.slice(1, 4)) {
+        await token.connect(j).approve(await tiny.getAddress(), U(100000));
+        await tiny.connect(j).stake(STAKE_PER_VOTE);
+      }
+      await mine(DRAW_DELAY + 1);
+      await tiny.drawJurors(id);
+      expect((await tiny.cases(id)).phase).to.equal(Phase.Commit, "上诉轮正常开庭");
     });
   });
 

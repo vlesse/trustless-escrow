@@ -363,11 +363,75 @@ describe("质押陪审团", function () {
     });
   });
 
+  // ============================================================== 案值
+
+  describe("案值必须传到仲裁层", function () {
+    // 陪审团抗贿赂的能力来自「买通过半席位要赔多少」，那是固定参数；
+    // 案值却是浮动的。合约看不见案值，就无从判断自己扛不扛得住这个案子。
+    it("直接挂在托管合约下时，案值 = 货款 + 双方押金", async function () {
+      await seatJurors();
+      const { deal, id } = await disputedDeal();
+      const expected = PRICE + BOND + BOND;
+
+      expect(await deal.disputeValue()).to.equal(expected);
+      expect((await jury.cases(id)).value).to.equal(expected, "裁决能挪动的就是这三笔钱");
+    });
+
+    it("案值随交易参数走，不是写死的常量", async function () {
+      await seatJurors();
+      const tx = await factory.connect(seller).createDeal(
+        await token.getAddress(), buyer.address, seller.address,
+        U(7000), U(300), U(400), 3 * 24 * 3600, 2 * 24 * 3600, ethers.ZeroHash
+      );
+      const rc = await tx.wait();
+      const deal = await ethers.getContractAt(
+        "Escrow", rc.logs.find((l) => l.fragment?.name === "DealCreated").args.deal
+      );
+      await token.connect(seller).approve(await deal.getAddress(), U(400));
+      await deal.connect(seller).depositSeller();
+      await token.connect(buyer).approve(await deal.getAddress(), U(7300));
+      await deal.connect(buyer).depositBuyer();
+      await deal.connect(seller).markDelivered("ipfs://x");
+      await deal.connect(buyer).raiseDispute("ipfs://e");
+
+      expect((await jury.cases(await deal.disputeID())).value).to.equal(U(7700));
+    });
+
+    it("买通过半席位的代价与案值的对比，是可以当场算出来的", async function () {
+      await seatJurors();
+      const { id } = await disputedDeal();
+
+      const value = (await jury.cases(id)).value;
+      const majority = (JURY_SIZE + 1n) / 2n;
+      const bribeCost = majority * STAKE_PER_VOTE;
+
+      // 这不是断言「现在安全」—— 恰恰相反，按默认参数它是不安全的，
+      // 买通 2 席只要 200，而案值是 3000。这条测试钉住的是「这笔账算得出来」，
+      // 也就是按案值约束陪审团规模这件事有了实现前提。
+      expect(bribeCost).to.be.lessThan(value, "默认参数下大额交易在结构上就是可买的");
+    });
+  });
+
   // ============================================================== 兜底
 
   describe("兜底机制", function () {
-    it("陪审员池为空时无法发起争议", async function () {
-      await expect(disputedDeal()).to.be.revertedWithCustomError(jury, "EmptyJuryPool");
+    it("陪审员池为空照样能发起争议 —— 案件挂着等人来质押，池子自己转起来", async function () {
+      // 陪审员池本来就是从空开始的：它靠「有案子可判、有仲裁费可赚」把人吸引进来。
+      // 如果受理时就卡死，raiseDispute 会整个失败，当事人连争议都提不起来，
+      // 只能干等仲裁方失联保护走中性拆分 —— 那等于把自启动的路堵了。
+      const { id } = await disputedDeal();
+      expect((await jury.cases(id)).phase).to.equal(Phase.Pending, "受理成功，挂在待抽选");
+
+      // 但这时候确实抽不了签
+      await mine(DRAW_DELAY + 1);
+      await expect(jury.drawJurors(id)).to.be.revertedWithCustomError(jury, "EmptyJuryPool");
+
+      // 有人闻着仲裁费来质押了，案件就能继续往下走
+      await seatJurors();
+      await mine(DRAW_DELAY + 1);
+      await jury.drawJurors(id);
+      expect((await jury.cases(id)).phase).to.equal(Phase.Commit, "有人来了就正常开庭");
+      expect(await jury.voteCount(id)).to.equal(JURY_SIZE);
     });
 
     it("单轮卡死超过 ROUND_TIMEOUT，任何人可触发拒裁取回资金", async function () {

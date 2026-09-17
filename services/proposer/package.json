@@ -9,7 +9,7 @@
     "start": "node src/index.js",
     "dry-run": "DRY_RUN=true node src/index.js",
     "once": "node src/index.js --once",
-    "test": "node --test test/proposer.test.js",
+    "test": "node --test test/proposer.test.js test/abi.test.js",
     "test:integration": "node test/integration.mjs"
   },
   "dependencies": {

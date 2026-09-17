@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IEscrowArbitrator, IEscrowArbitrable} from "../interfaces/IEscrowArbitrator.sol";
+import {IEscrowArbitrator, IEscrowArbitrable, IEscrowTerms} from "../interfaces/IEscrowArbitrator.sol";
 import {SafeTransfer} from "../lib/SafeTransfer.sol";
 import {IRandomnessSource} from "../interfaces/IRandomnessSource.sol";
 
@@ -176,13 +176,26 @@ contract StakedJury is IEscrowArbitrator {
         ///      不影响任何已经开始的轮次。否则「看到一个不想输的案子再换来源」
         ///      就成了一个现成的攻击路径。
         address rngSource;
+        /// @notice 受理时快照的案值 —— 一个被买通的裁决最多能挪动多少钱。
+        /// @dev 陪审团抗贿赂的能力来自「过半席位会被罚没的总额」，那是固定参数；
+        ///      案值却是浮动的。两者不挂钩，案值一旦超过买通成本，
+        ///      买裁决在结构上就是划算的。存下来是为了让上层能算这笔账。
+        uint256 value;
         /// @notice 受理时快照的第一轮价钱，上诉费按它换算。
         /// @dev 不能现取 `costOf` —— 那等于给管理员一个开关：
         ///      看到一个不想被推翻的裁决，把价钱调高到当事人付不起就行了。
         uint256 baseCost;
     }
 
-    mapping(uint256 => Case) public cases;
+    /// @dev 私有 + 显式 getter，而不是 public 自动 getter：
+    ///      Case 的字段超过十来个之后，自动 getter 要在栈上摊开全部返回值，
+    ///      会直接撞上 EVM 的栈深度上限编译不过。返回 memory 结构体没有这个问题，
+    ///      而且调用方拿到的仍然是带字段名的对象。
+    mapping(uint256 => Case) private _cases;
+
+    function cases(uint256 id) external view returns (Case memory) {
+        return _cases[id];
+    }
     mapping(uint256 => Round[]) public rounds;
     /// @notice 全案席位，按轮次先后平铺。slot 在一个案件内全局唯一。
     mapping(uint256 => Vote[]) public votes;
@@ -207,7 +220,7 @@ contract StakedJury is IEscrowArbitrator {
 
     event Staked(address indexed juror, uint256 amount, uint256 total);
     event Unstaked(address indexed juror, uint256 amount, uint256 remaining);
-    event CaseCreated(uint256 indexed id, address indexed arbitrable, uint64 drawBlock);
+    event CaseCreated(uint256 indexed id, address indexed arbitrable, uint64 drawBlock, uint256 value);
     event JurorsDrawn(uint256 indexed id, uint256 indexed round, address[] drawn, uint64 commitDeadline);
     event VoteCommitted(uint256 indexed id, uint256 indexed slot, address indexed juror);
     event VoteRevealed(uint256 indexed id, uint256 indexed slot, address indexed juror, uint8 ruling);
@@ -339,31 +352,25 @@ contract StakedJury is IEscrowArbitrator {
     ///      - 上层是 OptimisticArbitrator：币种是逐笔的，通过 extraData 传入；
     ///      - 上层直接是 Escrow（不经乐观层）：extraData 为空，回退到读取 msg.sender.token()。
     ///      两种接法都要支持，否则本合约只能挂在某一种上层下面。
+    /// @dev **受理争议不要求陪审员池非空。**
+    ///
+    ///      早期版本在这里卡了一道 `totalStake == 0` 就 revert 的门槛。
+    ///      那是错的：它会让 `Escrow.raiseDispute()` 整个失败，于是
+    ///      **池子空的时候当事人连争议都提不起来**，只能干等仲裁方失联保护
+    ///      走中性拆分。而陪审员池本来就是从空开始的 —— 它靠「有案子可判、
+    ///      有仲裁费可赚」把人吸引进来。受理时就拦死，等于把自启动的路堵了。
+    ///
+    ///      正确的做法是让案件挂在待抽选，`drawJurors` 那一步才要求池子非空；
+    ///      迟迟凑不齐人由 `ROUND_TIMEOUT` 兜底，资金照样不会锁死。
     function createDispute(uint256 choices, bytes calldata extraData) external nonReentrant returns (uint256 id) {
         if (choices != 2) revert BadRuling();
-        if (totalStake == 0) revert EmptyJuryPool();
 
-        address feeToken =
-            extraData.length >= 32 ? abi.decode(extraData, (address)) : IFeeToken(msg.sender).token();
+        (address feeToken, uint256 value) = _terms(extraData);
         if (feeToken == address(0)) revert ZeroAddress();
         if (costOf[feeToken] == 0) revert CostNotConfigured();
 
         id = nextCaseID++;
-        cases[id] = Case({
-            arbitrable: msg.sender,
-            feeToken: feeToken,
-            phase: Phase.Pending,
-            ruling: 0,
-            drawBlock: uint64(block.number) + DRAW_DELAY,
-            commitDeadline: 0,
-            revealDeadline: 0,
-            appealDeadline: 0,
-            roundStartedAt: uint64(block.timestamp),
-            createdAt: uint64(block.timestamp),
-            rngRequestedAt: 0,
-            rngSource: address(0),
-            baseCost: costOf[feeToken]
-        });
+        _openCase(id, feeToken, value);
 
         rounds[id].push(
             Round({
@@ -377,12 +384,42 @@ contract StakedJury is IEscrowArbitrator {
         );
 
         _requestRandomness(id, 0);
-        emit CaseCreated(id, msg.sender, cases[id].drawBlock);
+        emit CaseCreated(id, msg.sender, _cases[id].drawBlock, value);
+    }
+
+    /// @dev 取本案的币种与案值。两条接法都要支持：
+    ///        - 上层是 OptimisticArbitrator：它在自己受理时已经快照过，直接透传；
+    ///        - 上层直接是 Escrow：extraData 为空，回头读它自己。
+    ///
+    ///      刻意不给「取不到案值就当 0」留后路 —— 那会让后续所有按案值做的
+    ///      保护静默失效，而且没有任何人会发现。取不到就响亮地失败。
+    function _terms(bytes calldata extraData) private view returns (address feeToken, uint256 value) {
+        if (extraData.length >= 64) {
+            (feeToken, value) = abi.decode(extraData, (address, uint256));
+        } else {
+            feeToken = IEscrowTerms(msg.sender).token();
+            value = IEscrowTerms(msg.sender).disputeValue();
+        }
+    }
+
+    /// @dev 逐字段写入而不是构造整个结构体字面量：字段变多之后
+    ///      `createDispute` 的局部变量会撞上 EVM 的栈深度上限。
+    ///      `id` 来自自增计数器，槽位必然是全新的，所以为 0 的字段不必显式写。
+    function _openCase(uint256 id, address feeToken, uint256 value) private {
+        Case storage c = _cases[id];
+        c.arbitrable = msg.sender;
+        c.feeToken = feeToken;
+        c.phase = Phase.Pending;
+        c.drawBlock = uint64(block.number) + DRAW_DELAY;
+        c.roundStartedAt = uint64(block.timestamp);
+        c.createdAt = uint64(block.timestamp);
+        c.value = value;
+        c.baseCost = costOf[feeToken];
     }
 
     /// @inheritdoc IEscrowArbitrator
     function currentRuling(uint256 id) external view returns (uint256) {
-        return cases[id].ruling;
+        return _cases[id].ruling;
     }
 
     // ============================================================== 随机数
@@ -406,8 +443,8 @@ contract StakedJury is IEscrowArbitrator {
             abi.encodeCall(IRandomnessSource.requestRandomness, (_rngKey(id, round)))
         );
         if (ok) {
-            cases[id].rngSource = src;
-            cases[id].rngRequestedAt = uint64(block.timestamp);
+            _cases[id].rngSource = src;
+            _cases[id].rngRequestedAt = uint64(block.timestamp);
             emit RandomnessRequested(id, round, src);
         } else {
             emit RandomnessRequestFailed(id, round, src);
@@ -447,9 +484,12 @@ contract StakedJury is IEscrowArbitrator {
     /// 预言机知道区块哈希，但 Chainlink VRF 的输出是可验证的：
     /// 它只能扣住不发（→ 超时 → 退回 blockhash），不能挑一个自己想要的值。
     function drawJurors(uint256 id) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Pending) revert BadPhase();
         if (block.number <= c.drawBlock) revert TooEarly();
+        // 池子为空不是「拒绝受理」的理由，只是「现在还抽不了」。
+        // 见 createDispute 的注释。超期由 ROUND_TIMEOUT 兜底。
+        if (totalStake == 0) revert EmptyJuryPool();
 
         bytes32 bh = blockhash(c.drawBlock);
         if (bh == bytes32(0)) {
@@ -514,7 +554,7 @@ contract StakedJury is IEscrowArbitrator {
     ///        必须包含 salt，否则只有两个可能取值的承诺可被暴力枚举出来；
     ///        必须包含地址，否则可以直接抄别人的承诺。
     function commitVote(uint256 id, uint256 slot, bytes32 commitment) external {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Commit) revert BadPhase();
         if (block.timestamp > c.commitDeadline) revert TooLate();
 
@@ -530,7 +570,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 提交承诺阶段结束，进入揭示阶段。任何人可推动。
     function startReveal(uint256 id) external {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Commit) revert BadPhase();
         if (block.timestamp <= c.commitDeadline) revert TooEarly();
 
@@ -540,7 +580,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 揭示投票。
     function revealVote(uint256 id, uint256 slot, uint8 ruling, bytes32 salt) external {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Reveal) revert BadPhase();
         if (block.timestamp > c.revealDeadline) revert TooLate();
         if (ruling == 0 || ruling > 2) revert BadRuling();
@@ -573,7 +613,7 @@ contract StakedJury is IEscrowArbitrator {
     /// 初审的多数派仍然拿到了报酬 —— 这在账面上不好看，但上诉制度的前提
     /// 本来就是「前一轮**可能**是错的」，付钱给初审并不等于宣布初审是对的。
     function tallyRound(uint256 id) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Reveal) revert BadPhase();
         if (block.timestamp <= c.revealDeadline) revert TooEarly();
 
@@ -667,7 +707,7 @@ contract StakedJury is IEscrowArbitrator {
     function appealCost(uint256 id) public view returns (uint256) {
         uint256 n = rounds[id].length;
         if (n == 0 || n >= MAX_ROUNDS) return 0;
-        return (cases[id].baseCost * _nextSize(rounds[id][n - 1].size)) / jurySize;
+        return (_cases[id].baseCost * _nextSize(rounds[id][n - 1].size)) / jurySize;
     }
 
     /// @dev 下一轮席位数：翻倍加一。保持奇数（避免平票），
@@ -696,11 +736,9 @@ contract StakedJury is IEscrowArbitrator {
     /// 如果上一轮是对的，更大的一轮只会更对 —— 重摇并不提高翻盘概率，
     /// 却要付出成倍的费用。只有当上一轮确实处在边缘，上诉才划算。
     function appeal(uint256 id) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Appealable) revert BadPhase();
         if (block.timestamp > c.appealDeadline) revert TooLate();
-
-        if (totalStake == 0) revert EmptyJuryPool();
 
         uint256 ri = rounds[id].length;
         if (ri >= MAX_ROUNDS) revert NoMoreAppeals();
@@ -747,7 +785,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 上诉窗口届满无人上诉，裁决成为终局裁决。任何人可推动。
     function finalize(uint256 id) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Appealable) revert BadPhase();
         if (block.timestamp <= c.appealDeadline) revert TooEarly();
         _finalize(id, _lastRuling(id));
@@ -776,7 +814,7 @@ contract StakedJury is IEscrowArbitrator {
     /// @notice 单轮彻底卡死的兜底：陪审员池为空导致长期无法抽选等。
     ///         超过 ROUND_TIMEOUT 后任何人可触发，让资金不至于永久锁死。
     function timeoutCase(uint256 id) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase == Phase.None || c.phase == Phase.Executed) revert BadPhase();
         if (block.timestamp < uint256(c.roundStartedAt) + ROUND_TIMEOUT) revert TooEarly();
 
@@ -787,7 +825,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @dev 结案：解锁尚未结算的席位、投递终局裁决、分配各轮报酬。
     function _finalize(uint256 id, uint8 ruling) private {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         c.phase = Phase.Executed;
         c.ruling = ruling;
 
@@ -830,7 +868,7 @@ contract StakedJury is IEscrowArbitrator {
     ///      - 第一轮：顺延给真正做出终局裁决的那一轮。
     ///      - 都不成立：并入 `recycled`，由下一个结案的案件发给它的第一轮陪审员。
     function _settlePools(uint256 id) private {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         uint256 n = rounds[id].length;
         Round storage last = rounds[id][n - 1];
 
@@ -873,7 +911,7 @@ contract StakedJury is IEscrowArbitrator {
 
     /// @notice 领取本席位那一轮的报酬分成。与该轮多数一致的席位可领。
     function claimReward(uint256 id, uint256 slot) external nonReentrant {
-        Case storage c = cases[id];
+        Case storage c = _cases[id];
         if (c.phase != Phase.Executed) revert BadPhase();
 
         Vote storage v = votes[id][slot];
@@ -988,6 +1026,3 @@ contract StakedJury is IEscrowArbitrator {
     }
 }
 
-interface IFeeToken {
-    function token() external view returns (address);
-}

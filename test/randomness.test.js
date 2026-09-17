@@ -52,8 +52,13 @@ describe("陪审团抽选的随机数", function () {
     );
   }
 
+  // extraData 现在还要带上案值：陪审团必须知道一个被买通的裁决能挪动多少钱，
+  // 否则它没法判断自己扛不扛得住这个案子。
+  const CASE_VALUE = U(3000);
   const extraData = async () =>
-    ethers.AbiCoder.defaultAbiCoder().encode(["address"], [await token.getAddress()]);
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ["address", "uint256"], [await token.getAddress(), CASE_VALUE]
+    );
 
   async function newCase() {
     const tx = await jury.connect(arbitrable).createDispute(2, await extraData());

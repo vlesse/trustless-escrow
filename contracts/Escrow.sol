@@ -379,6 +379,15 @@ contract Escrow is IEscrowArbitrable {
 
     // ---------------------------------------------------------------- 只读
 
+    /// @notice 本笔交易中「可以被裁决改变归属」的总额。
+    ///
+    /// @dev 三笔钱：货款、买家押金、卖家押金。裁决无论判成哪一种，
+    ///      都是在这三笔之间重新分配，所以这就是一个被买通的裁决
+    ///      最多能挪动的金额。仲裁层拿它来判断自己扛不扛得住这个案子。
+    function disputeValue() public view returns (uint256) {
+        return price + buyerBond + sellerBond;
+    }
+
     /// @notice 供前端与审计者一次性读取全部状态。
     function summary()
         external

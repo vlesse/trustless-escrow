@@ -119,6 +119,11 @@ describe("全链路集成", function () {
       optimistic: await token.balanceOf(await optimistic.getAddress()),
     };
 
+    // 经乐观层上来的案子，案值必须一路透传到终局仲裁方
+    expect((await jury.cases(juryCaseID)).value).to.equal(
+      PRICE + BOND + BOND, "案值要穿过乐观层传到陪审团"
+    );
+
     await jury.connect(outsider).tallyRound(juryCaseID);
     await time.increase(APPEAL_WINDOW + 1); // 无人上诉，裁决才落地
     await jury.connect(outsider).finalize(juryCaseID);

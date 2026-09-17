@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {IEscrowArbitrator, IEscrowArbitrable} from "../interfaces/IEscrowArbitrator.sol";
+import {IEscrowArbitrator, IEscrowArbitrable, IEscrowTerms} from "../interfaces/IEscrowArbitrator.sol";
 import {SafeTransfer} from "../lib/SafeTransfer.sol";
-
-interface IEscrowView {
-    function token() external view returns (address);
-}
 
 interface IDealRegistry {
     function isDeal(address) external view returns (bool);
@@ -61,6 +57,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         address challenger;
         uint256 bond;         // 单边保证金金额（提案人与挑战者各质押这么多）
         uint256 finalCost;    // 受理时快照的终局仲裁成本，防止中途被抬价
+        uint256 value;        // 受理时快照的案值，透传给终局仲裁方
     }
 
     /// @notice 交易实例注册表（EscrowFactory），用于校验争议来源合法。
@@ -92,7 +89,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     /// @notice 终局仲裁方的 disputeID → 本合约的 disputeID
     mapping(uint256 => uint256) public finalToLocal;
 
-    event DisputeCreated(uint256 indexed id, address indexed arbitrable, address token, uint256 bond);
+    event DisputeCreated(uint256 indexed id, address indexed arbitrable, address token, uint256 bond, uint256 value);
     event RulingProposed(uint256 indexed id, uint8 ruling, address indexed proposer);
     event Challenged(uint256 indexed id, address indexed challenger, uint256 finalDisputeID);
     event Executed(uint256 indexed id, uint8 ruling, bool wasChallenged);
@@ -154,7 +151,10 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         if (!registry.isDeal(msg.sender)) revert NotRegisteredDeal();
         if (choices != 2) revert BadRuling();
 
-        address token = IEscrowView(msg.sender).token();
+        address token = IEscrowTerms(msg.sender).token();
+        // 案值在受理时一并快照。托管合约的参数本来就不可变，但快照让本层的账
+        // 不依赖事后再去读对方，少一次外部调用也少一个失败点。
+        uint256 value = IEscrowTerms(msg.sender).disputeValue();
         uint256 cost = costOf[token];
         if (cost == 0) revert CostNotConfigured();
 
@@ -165,19 +165,19 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         if (cost < finalCost) revert CostBelowFinalCost();
 
         id = nextDisputeID++;
-        disputes[id] = Dispute({
-            arbitrable: msg.sender,
-            token: token,
-            status: Status.Open,
-            proposedRuling: 0,
-            proposedAt: 0,
-            createdAt: uint64(block.timestamp),
-            challenger: address(0),
-            bond: bondOf[token],
-            finalCost: finalCost
-        });
+        // 逐字段写入而不是构造整个结构体字面量：字段变多之后
+        // 本函数的局部变量会撞上 EVM 的栈深度上限。
+        // id 来自自增计数器，槽位必然全新，所以为 0 的字段不必显式写。
+        Dispute storage d = disputes[id];
+        d.arbitrable = msg.sender;
+        d.token = token;
+        d.status = Status.Open;
+        d.createdAt = uint64(block.timestamp);
+        d.bond = bondOf[token];
+        d.finalCost = finalCost;
+        d.value = value;
 
-        emit DisputeCreated(id, msg.sender, token, bondOf[token]);
+        emit DisputeCreated(id, msg.sender, token, bondOf[token], value);
     }
 
     /// @inheritdoc IEscrowArbitrator
@@ -219,7 +219,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         lockedBonds[d.token] += d.bond;
         d.token.safeTransferFrom(msg.sender, address(this), d.bond);
 
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token));
+        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token, d.value));
         finalToLocal[finalID] = id;
 
         emit Challenged(id, msg.sender, finalID);
@@ -252,7 +252,7 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         if (block.timestamp <= uint256(d.createdAt) + PROPOSAL_WINDOW) revert WindowOpen();
 
         d.status = Status.Escalated;
-        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token));
+        uint256 finalID = IEscrowArbitrator(finalArbitrator).createDispute(2, abi.encode(d.token, d.value));
         finalToLocal[finalID] = id;
         emit Challenged(id, address(0), finalID);
     }

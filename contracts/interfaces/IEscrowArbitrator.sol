@@ -22,6 +22,22 @@ interface IEscrowArbitrator {
     function currentRuling(uint256 disputeID) external view returns (uint256);
 }
 
+/// @title IEscrowTerms
+/// @notice 仲裁方读取被仲裁交易的经济参数。
+///
+/// @dev 为什么仲裁层必须看得到案值：仲裁方抗贿赂的能力来自陪审员会被罚没的钱，
+///      那是一组固定参数；而案值是浮动的。两者不挂钩，就意味着
+///      **案值一旦超过「买通过半席位的成本」，买通裁决在结构上就是划算的** ——
+///      那不是「可能被贿赂」，是「算出来就该被贿赂」。
+///      所以仲裁方必须能读到这个数，才谈得上按它调整规模、定价，或者干脆拒绝受理。
+interface IEscrowTerms {
+    /// @notice 结算币种。
+    function token() external view returns (address);
+
+    /// @notice 本笔交易中「可以被裁决改变归属」的总额。
+    function disputeValue() external view returns (uint256);
+}
+
 /// @title IEscrowArbitrable
 /// @notice 能被裁决的合约（即托管合约）实现的接口。
 interface IEscrowArbitrable {
