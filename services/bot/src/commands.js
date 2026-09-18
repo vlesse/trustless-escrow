@@ -9,11 +9,13 @@ import {
   tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State,
 } from "./deals.js";
 import {
-  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toEip681,
+  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toEip681, buildFundDeal,
 } from "./txlink.js";
 import {
   dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
 } from "./arbitration.js";
+import * as quota from "./quota.js";
+import * as quotacmd from "./quotacommands.js";
 
 const provider = makeProvider();
 
@@ -98,6 +100,11 @@ export async function cmdHelp(chatId) {
     esc("信誉只在「对方保证金低于货款」时才需要。保证金不低于货款时，"),
     esc("骗你这一笔的罚没大于收益 —— 那时你不需要相信任何人。"),
     esc("身份押金不是罚金，没有任何人能罚没它。它买的是年龄：钱能瞬间凑齐，年龄不能。"),
+    "",
+    "*商家额度是什么*",
+    esc("同时接很多单的卖家，每单都要先授权再入金，两笔交易。把钱预存进额度池之后"),
+    esc("每单只要一笔。它不是共享抵押 —— 每笔交易的保证金照样进各自的托管合约，"),
+    esc("一笔出事不波及别笔。池子里的钱随时可以全额取回。"),
   ].join("\n"));
 }
 
@@ -431,6 +438,23 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
   switch (actionId) {
     case "deposit": {
       const amount = role === "buyer" ? deal.price + deal.buyerBond : deal.sellerBond;
+
+      // 卖家如果有额度，一笔就够了：额度池替他把保证金付进这笔交易的托管合约。
+      // 额度不够时不要卡住他 —— 告诉他差多少，然后照常给出两笔的老路。
+      if (role === "seller") {
+        const f = await quotacmd.dealFundability(deal.address, u.address);
+        if (f.ok) {
+          await sendMessage(chatId,
+            `即将用额度支付保证金 *${esc(fmtAmount(amount, info))}*\n\n` +
+            esc("只需一笔交易。钱从你的额度里扣，直接进这笔交易的托管合约。"));
+          await sendTxs(chatId, [buildFundDeal(f.pool, deal.address)]);
+          return;
+        }
+        if (f.why === "insufficient") {
+          await sendMessage(chatId, quota.renderShort({ short: f.short, info: f.info }));
+        }
+      }
+
       await sendMessage(chatId,
         `即将锁定 *${esc(fmtAmount(amount, info))}*\n\n` +
         esc("需要两笔交易：先授权托管合约划转，再入金。"));

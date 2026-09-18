@@ -50,6 +50,12 @@ const IDENTITY_BOND_ABI = [
   "function withdraw()",
 ];
 const REPUTATION_ABI = ["function record(address deal)"];
+
+const MERCHANT_BOND_ABI = [
+  "function deposit(uint256 amount)",
+  "function withdraw(uint256 amount)",
+  "function fundDeal(address deal)",
+];
 const DEAL_READ_ABI = [
   "function token() view returns (address)",
   "function price() view returns (uint256)",
@@ -63,6 +69,7 @@ const ifaces = {
   erc20: new ethers.Interface(ERC20_ABI),
   identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
   reputation: new ethers.Interface(REPUTATION_ABI),
+  merchantBond: new ethers.Interface(MERCHANT_BOND_ABI),
 };
 
 /// 每个操作的人话描述。`risk` 决定确认区的视觉强度。
@@ -149,6 +156,28 @@ const ACTIONS = {
     title: "记录一笔交易的结果",
     risk: "low",
     note: "把一笔已结束交易的结果沉淀成双方的公开记录。不转移任何资金，记录写入后无法删除。",
+  },
+
+  deposit: {
+    title: "存入商家额度",
+    risk: "medium",
+    note: "预存一笔钱，之后每开一单直接从这里扣保证金，省掉每次授权。这笔钱还没有承担任何义务，随时可以全额取回。",
+  },
+  fundDeal: {
+    title: "用额度支付这笔交易的保证金",
+    risk: "high",
+    note: "从你的额度里扣一笔，直接进这笔交易的托管合约。和自己入金完全等价 —— 正常成交后原额退回你的钱包（不是退回额度池）。",
+  },
+};
+
+/// `withdraw` 在身份押金和商家额度池上是同名的两个方法，含义天差地别：
+/// 一个会让身份年龄归零，一个只是取回还没用掉的预付款。
+/// 只按方法名查表会让用户看到完全错误的说明，所以这里必须按目标地址分流。
+const WITHDRAW_BY_TARGET = {
+  merchantBond: {
+    title: "取回商家额度",
+    risk: "low",
+    note: "取回还没用掉的预付款。不影响任何已经入金的交易 —— 那些钱早就在各自的托管合约里了。",
   },
 };
 
@@ -238,6 +267,22 @@ async function runChecks(tx, decoded, chain) {
           : configured
             ? `目标 ${tx.to} 不是配置的身份押金合约 ${chain.identityBond}`
             : "本页未配置身份押金合约地址，无法验证目标，拒绝放行");
+    } else if (decoded.kind === "merchantBond") {
+      const configured = (chain.merchantBond || "").toLowerCase();
+      const ok = Boolean(configured) && tx.to.toLowerCase() === configured;
+      add(ok, "目标是配置里的商家额度池",
+        ok ? tx.to
+          : configured
+            ? `目标 ${tx.to} 不是配置的商家额度池 ${chain.merchantBond}`
+            : "本页未配置商家额度池地址，无法验证目标，拒绝放行");
+
+      // fundDeal 的参数是一笔交易，同样要验它确实是工厂发出来的
+      if (ok && decoded.name === "fundDeal") {
+        const target = decoded.args[0];
+        const isDeal = await factory.isDeal(target);
+        add(isDeal, "要支付的那笔交易是工厂登记的托管合约",
+          isDeal ? target : `${target} 不是本协议工厂创建的交易，请勿签名`);
+      }
     } else if (decoded.kind === "reputation") {
       const configured = (chain.reputation || "").toLowerCase();
       const ok = Boolean(configured) && tx.to.toLowerCase() === configured;
@@ -251,8 +296,13 @@ async function runChecks(tx, decoded, chain) {
       const spender = decoded.args[0];
       const toBond = Boolean(chain.identityBond)
         && spender.toLowerCase() === chain.identityBond.toLowerCase();
-      const ok = toBond || (await factory.isDeal(spender));
-      add(ok, toBond ? "被授权方是配置里的身份押金合约" : "被授权方是工厂登记的托管合约",
+      const toQuota = Boolean(chain.merchantBond)
+        && spender.toLowerCase() === chain.merchantBond.toLowerCase();
+      const ok = toBond || toQuota || (await factory.isDeal(spender));
+      add(ok,
+        toBond ? "被授权方是配置里的身份押金合约"
+          : toQuota ? "被授权方是配置里的商家额度池"
+            : "被授权方是工厂登记的托管合约",
         ok ? spender : `被授权方 ${spender} 不是本协议的合约。签下去等于把代币划转权交给一个陌生合约。`);
 
       // 无限授权在本协议里永远没有必要：每一步需要多少就授权多少。
@@ -262,13 +312,15 @@ async function runChecks(tx, decoded, chain) {
       add(finite, "不是无限授权",
         finite ? "额度有限" : "这是一笔无限授权 —— 本协议的任何步骤都不需要它，请勿签名");
 
-      if (toBond) {
-        // 押入金额由用户自己决定，没有可对照的链上数字，检查到此为止
-        add(true, "授权额度检查", "身份押金金额由你自行决定，页面不做额度上限判断");
+      if (toBond || toQuota) {
+        // 押入/预存金额由用户自己决定，没有可对照的链上数字，检查到此为止
+        add(true, "授权额度检查",
+          toBond ? "身份押金金额由你自行决定，页面不做额度上限判断"
+            : "预存额度金额由你自行决定，页面不做额度上限判断");
       }
 
       // 授权额度不应超过该笔交易实际需要的金额
-      if (ok && !toBond) {
+      if (ok && !toBond && !toQuota) {
         try {
           const deal = new ethers.Contract(spender, DEAL_READ_ABI, rpc);
           const [price, bb, sb] = await Promise.all([deal.price(), deal.buyerBond(), deal.sellerBond()]);
@@ -326,16 +378,31 @@ function render() {
   const { tx, decoded, checks, chain } = state;
   let action = decoded ? ACTIONS[decoded.name] : null;
 
-  // approve 有两个可能的被授权方（托管合约 / 身份押金合约）。
+  // 同名方法必须按真实目标分流。`withdraw` 在身份押金合约上会让身份年龄归零，
+  // 在商家额度池上只是取回一笔还没用掉的预付款 —— 两者显示同一段说明，
+  // 用户会照着完全错误的描述点确认。
+  if (decoded && decoded.name === "withdraw" && decoded.kind === "merchantBond") {
+    action = WITHDRAW_BY_TARGET.merchantBond;
+  }
+
+  // approve 有三个可能的被授权方（托管合约 / 身份押金合约 / 商家额度池）。
   // 标题必须说的是这一笔真实的对象 —— 标题写「托管合约」而下面的核验行
   // 写「身份押金合约」，用户就得自己去判断哪个才算数，这正是签名页要消灭的事。
-  if (action && decoded.name === "approve" && chain.identityBond
-      && decoded.args[0].toLowerCase() === chain.identityBond.toLowerCase()) {
-    action = {
-      ...action,
-      title: "授权身份押金合约划转你的代币",
-      note: "这一步本身不转账，只是允许身份押金合约在下一步划走指定额度。额度只给本次所需，不是无限授权。",
-    };
+  if (action && decoded.name === "approve") {
+    const spender = decoded.args[0].toLowerCase();
+    if (chain.identityBond && spender === chain.identityBond.toLowerCase()) {
+      action = {
+        ...action,
+        title: "授权身份押金合约划转你的代币",
+        note: "这一步本身不转账，只是允许身份押金合约在下一步划走指定额度。额度只给本次所需，不是无限授权。",
+      };
+    } else if (chain.merchantBond && spender === chain.merchantBond.toLowerCase()) {
+      action = {
+        ...action,
+        title: "授权商家额度池划转你的代币",
+        note: "这一步本身不转账，只是允许额度池在下一步划走你要预存的金额。额度只给本次所需，不是无限授权。",
+      };
+    }
   }
   const allOk = checks.every((c) => c.ok);
 

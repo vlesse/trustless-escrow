@@ -43,12 +43,19 @@ export const IDENTITY_BOND_ABI = [
 
 export const REPUTATION_ABI = ["function record(address deal)"];
 
+export const MERCHANT_BOND_ABI = [
+  "function deposit(uint256 amount)",
+  "function withdraw(uint256 amount)",
+  "function fundDeal(address deal)",
+];
+
 const ifaces = {
   factory: new ethers.Interface(FACTORY_ABI),
   escrow: new ethers.Interface(ESCROW_ABI),
   erc20: new ethers.Interface(ERC20_ABI),
   identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
   reputation: new ethers.Interface(REPUTATION_ABI),
+  merchantBond: new ethers.Interface(MERCHANT_BOND_ABI),
 };
 
 /**
@@ -96,6 +103,22 @@ export function buildDepositFlow({ token, escrow, amount, role }) {
       role === "buyer" ? "买家入金（货款 + 保证金）" : "卖家入金（保证金）"),
   ];
 }
+
+/// 存额度同样是两笔：先授权，再存入。
+export function buildQuotaDeposit(token, pool, amount) {
+  return [
+    buildApprove(token, pool, amount),
+    buildTx("merchantBond", pool, "deposit", [amount], "存入额度"),
+  ];
+}
+
+export const buildQuotaWithdraw = (pool, amount) =>
+  buildTx("merchantBond", pool, "withdraw", [amount], "取回额度");
+
+/// 用额度支付某笔交易的卖家保证金。
+/// 这是额度池存在的意义：它替代了「授权 + 入金」那两笔，只剩一笔。
+export const buildFundDeal = (pool, deal) =>
+  buildTx("merchantBond", pool, "fundDeal", [deal], "用额度支付保证金");
 
 export function buildCreateDeal(params) {
   return buildTx("factory", config.escrowFactory, "createDeal", [

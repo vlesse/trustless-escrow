@@ -57,6 +57,9 @@ export const config = {
   reputation: optAddr("REPUTATION"),
   identityBond: optAddr("IDENTITY_BOND"),
 
+  /// 商家额度池（可选）。不配置则整个额度功能静默关闭，担保交易不受影响。
+  merchantBond: optAddr("MERCHANT_BOND"),
+
   stateFile: process.env.STATE_FILE ?? "./.bot-state.json",
 };
 

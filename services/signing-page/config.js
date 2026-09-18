@@ -17,6 +17,8 @@ window.ESCROW_CONFIG = {
       // 无法验证目标地址时，不放行才是正确的默认。
       identityBond: "",
       reputation: "",
+      // 商家额度池（可选）。留空则页面拒绝为额度相关调用放行。
+      merchantBond: "",
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     },
     31337: {
@@ -28,6 +30,8 @@ window.ESCROW_CONFIG = {
       // 无法验证目标地址时，不放行才是正确的默认。
       identityBond: "",
       reputation: "",
+      // 商家额度池（可选）。留空则页面拒绝为额度相关调用放行。
+      merchantBond: "",
       nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
     },
   },

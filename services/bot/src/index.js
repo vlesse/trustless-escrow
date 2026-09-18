@@ -4,6 +4,7 @@ import * as session from "./session.js";
 import { scanForSecrets, secretWarning } from "./secrets.js";
 import * as cmd from "./commands.js";
 import * as repcmd from "./repcommands.js";
+import * as quotacmd from "./quotacommands.js";
 import { start as startWatcher } from "./watcher.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
@@ -47,6 +48,8 @@ async function onMessage(msg) {
       case "/bond": return repcmd.cmdBond(chatId, userId, args[0] ?? "");
       case "/unbond": return repcmd.cmdUnbond(chatId, userId);
       case "/record": return repcmd.cmdRecord(chatId, userId, args[0] ?? "");
+      case "/quota": return quotacmd.cmdQuota(chatId, userId, args[0] ?? "", args[1] ?? "");
+      case "/unquota": return quotacmd.cmdUnquota(chatId, userId, args[0] ?? "");
       case "/cancel":
         session.clearFlow(userId);
         return sendMessage(chatId, esc("已退出当前流程。"));
