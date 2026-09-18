@@ -86,6 +86,15 @@ contract Escrow is IEscrowArbitrable {
     address public feeVault;
     address public arbitrator;
 
+    /// @notice 唯一被允许代卖家支付保证金的地址，创建时写死，此后不可更改。
+    ///
+    /// @dev 为什么不干脆放开「谁都可以代付」：代付会让第三方把一个卖家
+    ///      硬塞进一笔他没同意的交易里。钱不是他出的，判输了他也不亏，
+    ///      但**信誉层会记下一笔未交付**。花点钱给竞争对手刷差评，
+    ///      这条路必须堵死。所以代付方是逐笔写死的一个地址，
+    ///      而那个地址（商家额度池）自己只认卖家本人的指令。
+    address public bondPayer;
+
     uint256 public price;
     uint256 public buyerBond;
     uint256 public sellerBond;
@@ -169,6 +178,7 @@ contract Escrow is IEscrowArbitrable {
         address seller;
         address feeVault;
         address arbitrator;
+        address bondPayer;
         uint256 price;
         uint256 buyerBond;
         uint256 sellerBond;
@@ -190,6 +200,7 @@ contract Escrow is IEscrowArbitrable {
         seller = t.seller;
         feeVault = t.feeVault;
         arbitrator = t.arbitrator;
+        bondPayer = t.bondPayer;
         price = t.price;
         buyerBond = t.buyerBond;
         sellerBond = t.sellerBond;
@@ -210,9 +221,10 @@ contract Escrow is IEscrowArbitrable {
     // 单方无法通过「关联对方地址」来冻结对方的钱 —— 这是原始构想里的一个
     // 免费敲诈攻击面，此处从机制上消除。
 
+    /// @dev 卖家本人，或创建时指定的代付方（商家额度池）。两者之外一律拒绝。
     function depositSeller() external nonReentrant {
         if (state != State.Open) revert BadState();
-        if (msg.sender != seller) revert NotParty();
+        if (msg.sender != seller && msg.sender != bondPayer) revert NotParty();
         if (sellerFunded) revert AlreadyFunded();
         sellerFunded = true;
         token.safeTransferFrom(msg.sender, address(this), sellerBond);

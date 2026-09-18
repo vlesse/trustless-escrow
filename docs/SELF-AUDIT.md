@@ -7,9 +7,21 @@
 ## 怎么复现
 
 ```bash
-pip install slither-analyzer      # 0.11.6
-slither .                         # 读 slither.config.json
+pip install slither-analyzer               # 0.11.6
+npx hardhat compile
+slither . --hardhat-ignore-compile         # 读 slither.config.json
 ```
+
+> **`--hardhat-ignore-compile` 不是可选的。** 不加它，Slither 会先跑
+> `npx hardhat clean --global` —— 那不只是删掉本项目的 `artifacts/`，
+> 它会把**全局的 solc 编译器缓存一起删掉**。在下载 solc 受限的网络环境里，
+> 这一下就让整个项目编译不动了（本项目踩过一次，靠手工把 solc 二进制
+> 塞回 `%LOCALAPPDATA%\hardhat-nodejs\Cache\compilers-v2\windows-amd64\`
+> 才恢复，那个目录还需要配套的 `list.json`）。
+>
+> 附带的坏处更隐蔽：产物被删之后，机器人与提案人里那几项「手写 ABI 对照
+> 编译产物」的测试会**静默跳过**而不是失败，跑出来仍然是全绿。
+> 所以跑完 Slither 一定要确认 `skipped` 是 0。
 
 范围:`contracts/` 下除 `mocks/` 外全部,**1470 行有效代码**。
 

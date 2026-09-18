@@ -166,6 +166,20 @@ async function main() {
     console.log("Reputation           ", await reputation.getAddress());
   }
 
+  // 商家额度池（可选，MERCHANT_BOND=1 启用）。商家把保证金预存进去，
+  // 之后每开一单一次调用直接扣，省掉每笔都要 approve 的那一步。
+  // 它**不做共享抵押** —— 钱最终还是逐笔进到各自的托管合约里，一笔出事不波及别笔。
+  if (process.env.MERCHANT_BOND === '1') {
+    const pool = await (await ethers.getContractFactory('MerchantBond')).deploy(
+      settlementToken, await factory.getAddress()
+    );
+    await pool.waitForDeployment();
+    const poolAddr = await pool.getAddress();
+    console.log('MerchantBond         ', poolAddr);
+    await (await factory.setMerchantBond(poolAddr)).wait();
+    console.log('已配置 factory.merchantBond');
+  }
+
   console.log("\n后续必须手工完成：");
   console.log("  1. 在区块浏览器上验证全部合约源码（透明度的前提）");
   console.log("  2. 确认 FeeVault.beneficiary 指向正确的冷钱包 —— 此项永久不可更改");
@@ -174,7 +188,9 @@ async function main() {
   console.log("  5. 把 IdentityBond / Reputation 地址填进机器人的 IDENTITY_BOND / REPUTATION，");
   console.log("     以及签名页 config.js 的 identityBond / reputation —— 无法验证的目标签名页会拒绝放行");
   console.log("  6. 若接了 VRF：把 ChainlinkVRFSource 加为订阅 consumer 并充值，否则会一直降级");
-  console.log("  7. 承载真实资金前必须完成第三方安全审计");
+  console.log('  7. 上线初期设一个保守的 factory.setMaxDealValue(token, cap)，');
+  console.log('     跑稳一段时间再往上放 —— 没有审计预算时这是唯一能真实封住下行的东西');
+  console.log('  8. 承载真实资金前必须完成第三方安全审计');
 }
 
 main().catch((e) => {

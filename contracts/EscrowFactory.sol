@@ -96,6 +96,21 @@ contract EscrowFactory {
         admin = _admin;
     }
 
+    /// @notice 商家额度池。逐笔快照进交易，作为唯一被允许代卖家支付保证金的地址。
+    ///
+    /// @dev 0 表示不启用，此时只有卖家本人能入金 —— 也就是本协议一直以来的行为。
+    ///      它只多出一条「代付」的权限，拿不走任何东西：代付方掏的是自己的钱，
+    ///      而结算永远只付给交易里写死的 seller。
+    ///      改它不影响任何已存在的交易（逐笔快照）。
+    address public merchantBond;
+
+    event MerchantBondChanged(address indexed from, address indexed to);
+
+    function setMerchantBond(address addr) external onlyAdmin {
+        emit MerchantBondChanged(merchantBond, addr);
+        merchantBond = addr;
+    }
+
     /// @notice 单笔交易的案值上限，按币种计。0 表示不限制。
     ///
     /// @dev **这是运营层面的风控，不是密码学保证。** 在没有第三方审计预算的
@@ -146,6 +161,7 @@ contract EscrowFactory {
                 seller: seller,
                 feeVault: defaultFeeVault,
                 arbitrator: defaultArbitrator,
+                bondPayer: merchantBond,
                 price: price,
                 buyerBond: buyerBond,
                 sellerBond: sellerBond,
