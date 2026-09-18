@@ -9,7 +9,8 @@ process.env.OPTIMISTIC_ARBITRATOR ??= "0x000000000000000000000000000000000000000
 process.env.ESCROW_FACTORY ??= "0x0000000000000000000000000000000000000002";
 
 const { buildEvidenceItem, detectInjection, Level } = await import("../src/evidence.js");
-const { buildUserContent, mapRuling } = await import("../src/adjudicate.js");
+const adj = await import("../src/adjudicate.js");
+const { buildUserContent, mapRuling } = adj;
 
 /// 不触网的 provider 替身：证据验证里的链上查询在单测中不需要真实节点
 const stubProvider = {
@@ -167,5 +168,58 @@ describe("裁决映射与弃权", () => {
     // 「判不了」不等于「双方都没错」，所以必须是 null（不提案），不是 0。
     assert.equal(mapRuling(v("inconclusive", 0.99), 0.8), null);
     assert.notEqual(mapRuling(v("inconclusive", 0.99), 0.8), 0);
+  });
+});
+
+// ============================================================ 证据总量预算
+
+describe("证据总量必须封顶", () => {
+  // 单份上限挡不住「20 份都塞满」：256 KB x 20 = 5 MB，约 250 万 token，
+  // 既超出上下文窗口让请求直接失败，这笔钱还是提案人付的 ——
+  // 不封顶就等于把 API 预算开放给任何人烧，对方的代价只有 gas。
+  const item = (n, len) => ({
+    submitter: `0x${n}`, kind: "text", content: "x".repeat(len),
+    verification: { level: "unverified", note: "测试用" },
+  });
+
+  test("总量在预算内时一份都不动", () => {
+    const out = adj.withinBudget([item(1, 100), item(2, 100)], 1000);
+    assert.equal(out.length, 2);
+    assert.ok(out.every((x) => !x.truncated && !x.omitted));
+    assert.equal(out[0].content.length, 100);
+  });
+
+  test("超出预算的那一份被截断，且明确标注", () => {
+    const out = adj.withinBudget([item(1, 600), item(2, 600)], 1000);
+    assert.equal(out[0].content.length, 600);
+    assert.equal(out[1].content.length, 400, "第二份只装得下剩余的 400");
+    assert.equal(out[1].truncated, true);
+  });
+
+  test("预算用尽之后的证据被标成未送入，而不是静默消失", () => {
+    // 静默丢证据比不看证据更糟：裁决者会以为自己看到了全部材料，
+    // 然后基于残缺的输入给出高置信度的结论。
+    const out = adj.withinBudget([item(1, 1000), item(2, 500), item(3, 500)], 1000);
+    assert.equal(out.length, 3, "一份都不能凭空消失");
+    assert.equal(out[1].omitted, true);
+    assert.equal(out[2].omitted, true);
+  });
+
+  test("被截断和被丢弃都会出现在送给模型的正文里", () => {
+    const big = [item(1, 800), item(2, 800), item(3, 800)];
+    const content = adj.buildUserContent(
+      { token: "0xT", price: "1", buyerBond: "1", sellerBond: "1", termsHash: "0x0",
+        markedDelivered: true, deliveryDeadline: 0, inspectionDeadline: 0,
+        disputeRaisedBy: "0xB", evidence: adj.withinBudget(big, 1000) },
+      "nonce"
+    );
+    assert.ok(content.includes("内容超长已截断"));
+    assert.ok(content.includes("证据总量已达上限"));
+  });
+
+  test("空内容不会把预算算错", () => {
+    const out = adj.withinBudget([{ submitter: "0x1", kind: "text" }, item(2, 100)], 1000);
+    assert.equal(out.length, 2);
+    assert.ok(!out[1].omitted);
   });
 });

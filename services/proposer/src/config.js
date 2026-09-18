@@ -45,6 +45,15 @@ export const config = {
   /// 单个案件最多处理多少份证据。
   maxEvidenceItems: num("MAX_EVIDENCE_ITEMS", 20),
 
+  /// 单个案件送进模型的证据正文**总量**上限（字节）。
+  ///
+  /// @dev 只有单份上限是不够的：256 KB x 20 份 = 5 MB，换算下来约 250 万 token，
+  ///      既超出上下文窗口（请求会直接失败），单次成本也要好几美元。
+  ///      更要命的是这笔钱由提案人付而不是当事人付 —— 每次都把证据塞满，
+  ///      就能白白烧掉运营方的 API 预算，代价只有 gas。
+  ///      所以必须有总量封顶，超出的部分按顺序截断并明确标注。
+  maxEvidenceTotalBytes: num("MAX_EVIDENCE_TOTAL_BYTES", 200 * 1024),
+
   /// 证据抓取超时（毫秒）。
   fetchTimeoutMs: num("FETCH_TIMEOUT_MS", 10_000),
 
