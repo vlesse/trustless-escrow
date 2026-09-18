@@ -2,6 +2,7 @@ import { ethers } from "ethers";
 import { config } from "./config.js";
 import * as session from "./session.js";
 import { makeProvider, loadDeal, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
+import * as juryalert from "./juryalert.js";
 import { esc } from "./telegram.js";
 
 /// 链上事件推送。
@@ -245,6 +246,49 @@ async function checkDeadlines(notify, tracked) {
   }
 }
 
+/// 扫描本轮新出现的抽选结果，把可疑的公开播出去。
+///
+/// 只有同时配了陪审团地址和广播频道才会跑。任何一步失败都只记一行日志 ——
+/// 这是一个附加的观测功能，不该有能力把交易提醒的主循环拖垮。
+async function scanDraws(notify, fromBlock, toBlock) {
+  if (!config.stakedJury || !config.alertChatId) return;
+
+  try {
+    const jury = new ethers.Contract(config.stakedJury, juryalert.JURY_ALERT_ABI, provider);
+    const drawnEvents = await jury.queryFilter(jury.filters.JurorsDrawn(), fromBlock, toBlock);
+    if (drawnEvents.length === 0) return;
+
+    // 案值只在 CaseCreated 里，抽选事件本身没有。往回捞一段拿到它。
+    const created = await jury.queryFilter(
+      jury.filters.CaseCreated(), Math.max(0, fromBlock - 200000), toBlock
+    );
+    const valueOf = new Map(created.map((e) => [e.args.id.toString(), e.args.value]));
+    const now = Math.floor(Date.now() / 1000);
+
+    for (const ev of drawnEvents) {
+      const id = ev.args.id.toString();
+      const key = `draw:${config.stakedJury}:${id}:${ev.args.round}`;
+      if (session.alreadyNotified(key)) continue;
+
+      const data = await juryalert.collectDraw({
+        jury: config.stakedJury,
+        id, round: Number(ev.args.round),
+        drawn: [...ev.args.drawn],
+        value: valueOf.get(id) ?? 0n,
+        provider, now,
+      });
+      const assessment = juryalert.assessDraw(data);
+      const text = juryalert.renderAlert({
+        id, round: Number(ev.args.round), assessment,
+        value: data.value, coverage: data.coverage, info: null,
+      });
+      if (text) await notify(config.alertChatId, text).catch((e) => console.error("广播失败:", e.message));
+    }
+  } catch (e) {
+    console.error("抽选预警扫描失败:", e.message);
+  }
+}
+
 /**
  * 启动监听。
  * @param {(chatId: string, text: string) => Promise<any>} notify 发消息的函数
@@ -262,6 +306,7 @@ export async function start(notify) {
       await discoverDeals(last + 1, safe, tracked);
       await processEvents(notify, tracked, last + 1, safe);
       await checkDeadlines(notify, tracked);
+      await scanDraws(notify, last + 1, safe);
 
       last = safe;
     } catch (e) {

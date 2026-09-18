@@ -60,6 +60,17 @@ export const config = {
   /// 商家额度池（可选）。不配置则整个额度功能静默关闭，担保交易不受影响。
   merchantBond: optAddr("MERCHANT_BOND"),
 
+  /// 陪审团合约（可选）。配了才做抽选风险预警。
+  stakedJury: optAddr("STAKED_JURY"),
+
+  /// 抽选风险预警的广播目标（Telegram 频道或群的 chat id）。
+  ///
+  /// 刻意做成**公开广播**而不是私发给运营方：纠错手段本来就是开放的
+  /// （任何人都可以自费上诉），缺的只是有人注意到。如果告警的终点是
+  /// 「运营者看到之后人工介入」，那就等于把整个项目花力气干掉的那个
+  /// 单点又请回来了。不配置则不广播。
+  alertChatId: process.env.ALERT_CHAT_ID ?? "",
+
   stateFile: process.env.STATE_FILE ?? "./.bot-state.json",
 };
 

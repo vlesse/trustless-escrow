@@ -190,7 +190,9 @@ async function main() {
   console.log("  6. 若接了 VRF：把 ChainlinkVRFSource 加为订阅 consumer 并充值，否则会一直降级");
   console.log('  7. 上线初期设一个保守的 factory.setMaxDealValue(token, cap)，');
   console.log('     跑稳一段时间再往上放 —— 没有审计预算时这是唯一能真实封住下行的东西');
-  console.log('  8. 承载真实资金前必须完成第三方安全审计');
+  console.log('  8. 想接抽选风险预警：把陪审团地址填进机器人的 STAKED_JURY，');
+  console.log('     并把 ALERT_CHAT_ID 指向一个公开频道 —— 私发给运营方等于把单点请回来');
+  console.log('  9. 承载真实资金前必须完成第三方安全审计');
 }
 
 main().catch((e) => {
