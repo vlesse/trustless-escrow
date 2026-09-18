@@ -355,3 +355,38 @@ contract AppealReenterer {
         reentrySucceeded = ok;
     }
 }
+
+interface IArbitrableRule {
+    function rule(uint256 disputeID, uint256 ruling) external;
+}
+
+/// @notice 最小的 ERC-792 仲裁方，用于测试 KlerosAdapter。
+/// @dev 只实现适配器真正依赖的那两个方法，外加一个手工投递裁决的入口。
+contract MockKlerosArbitrator {
+    uint256 public cost;
+    uint256 public nextID = 1;
+    mapping(uint256 => address) public arbitrableOf;
+
+    constructor(uint256 _cost) {
+        cost = _cost;
+    }
+
+    function setCost(uint256 c) external {
+        cost = c;
+    }
+
+    function arbitrationCost(bytes calldata) external view returns (uint256) {
+        return cost;
+    }
+
+    function createDispute(uint256, bytes calldata) external payable returns (uint256 id) {
+        require(msg.value >= cost, "insufficient ETH");
+        id = nextID++;
+        arbitrableOf[id] = msg.sender;
+    }
+
+    /// @notice 模拟陪审团出结果之后回调。
+    function giveRuling(uint256 id, uint256 ruling) external {
+        IArbitrableRule(arbitrableOf[id]).rule(id, ruling);
+    }
+}

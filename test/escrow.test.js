@@ -392,5 +392,77 @@ describe("托管协议", function () {
       // 金库没有任何改向函数
       expect(vault.interface.fragments.some((f) => /setBeneficiary|withdrawTo|rescue/i.test(f.name ?? ""))).to.equal(false);
     });
+
+    // 这一条钉的是规则本身，而不是某一条路径。
+    //
+    // 起因：README 的对抗表里写过「争议、取消、超时路径的手续费恒为 0」，
+    // 而卖家胜诉那一支是**照收全额手续费**的（那笔交易确实完成了，
+    // 是买家恶意申诉）。各条路径本来都有断言，但没有任何一处把规则写下来，
+    // 于是文档跑偏了也没人发现。现在规则有了唯一的落点。
+    it("手续费当且仅当卖家真的拿到了货款时产生", async function () {
+      const t = await token.getAddress();
+      const feeOf = async (fn) => {
+        const before = await vault.pending(t);
+        await fn();
+        return (await vault.pending(t)) - before;
+      };
+
+      // 收费的两种：正常成交、买家恶意申诉败诉
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await d.connect(seller).markDelivered("x");
+        await d.connect(buyer).confirmReceipt();
+      })).to.equal(FEE, "正常成交");
+
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await d.connect(seller).markDelivered("x");
+        await d.connect(buyer).raiseDispute("x");
+        await arb.giveRuling(await d.getAddress(), await d.disputeID(), 2);
+      })).to.equal(FEE, "买家恶意申诉败诉 —— 交易实际完成了，照常收费");
+
+      // 不收费的五种：卖家没拿到货款，平台就没有可收的东西
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await d.connect(seller).markDelivered("x");
+        await d.connect(buyer).raiseDispute("x");
+        await arb.giveRuling(await d.getAddress(), await d.disputeID(), 1);
+      })).to.equal(0n, "买家胜诉");
+
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await d.connect(seller).markDelivered("x");
+        await d.connect(buyer).raiseDispute("x");
+        await arb.giveRuling(await d.getAddress(), await d.disputeID(), 0);
+      })).to.equal(0n, "拒裁 / 中性拆分");
+
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await time.increase(DELIVERY_WINDOW + 1);
+        await d.connect(buyer).claimNonDelivery();
+      })).to.equal(0n, "卖家逾期未交付");
+
+      expect(await feeOf(async () => {
+        const d = await fundedDeal();
+        await d.connect(seller).markDelivered("x");
+        await d.connect(buyer).raiseDispute("x");
+        await time.increase(45 * 24 * 3600 + 1);
+        await d.connect(outsider).resolveStaleDispute();
+      })).to.equal(0n, "仲裁方失联超时");
+
+      expect(await feeOf(async () => {
+        const tx = await factory.connect(seller).createDeal(
+          t, buyer.address, seller.address,
+          PRICE, BUYER_BOND, SELLER_BOND, DELIVERY_WINDOW, INSPECTION_WINDOW, ethers.ZeroHash
+        );
+        const rc = await tx.wait();
+        const d = await ethers.getContractAt(
+          "Escrow", rc.logs.find((l) => l.fragment?.name === "DealCreated").args.deal
+        );
+        await token.connect(seller).approve(await d.getAddress(), SELLER_BOND);
+        await d.connect(seller).depositSeller();
+        await d.connect(seller).cancelUnfunded();
+      })).to.equal(0n, "未完全入金时取消");
+    });
   });
 });
