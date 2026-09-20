@@ -1,0 +1,25 @@
+[Unit]
+Description=Trustless Escrow keeper (BSC testnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=escrow
+WorkingDirectory=/srv/escrow/services/keeper
+EnvironmentFile=/srv/escrow/services/keeper/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/srv/escrow/logs/keeper.log
+StandardError=append:/srv/escrow/logs/keeper.log
+# 这把钥匙只能做无需许可的事，碰不到任何人的资金，所以可以热放在机器上。
+# 但仍然按最小权限跑：只读根文件系统之外的东西一概不给。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/escrow/services/keeper /srv/escrow/logs
+
+[Install]
+WantedBy=multi-user.target

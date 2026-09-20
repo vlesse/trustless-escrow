@@ -1,0 +1,7 @@
+[Unit]
+Description=每 30 分钟试一次陪审员揭示
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+[Install]
+WantedBy=timers.target

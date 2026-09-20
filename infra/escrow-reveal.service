@@ -1,0 +1,9 @@
+[Unit]
+Description=Trustless Escrow jury reveal attempt
+[Service]
+Type=oneshot
+User=escrow
+WorkingDirectory=/srv/escrow
+ExecStart=/srv/escrow/reveal-try.sh
+StandardOutput=append:/srv/escrow/logs/reveal.log
+StandardError=append:/srv/escrow/logs/reveal.log
