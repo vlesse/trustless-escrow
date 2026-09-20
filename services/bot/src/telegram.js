@@ -55,7 +55,11 @@ export async function* updates() {
       batch = await call("getUpdates", {
         offset,
         timeout: config.pollTimeoutSec,
-        allowed_updates: ["message", "callback_query"],
+        // my_chat_member：机器人被拉进/踢出某个群时的通知。
+        // 要它是为了在被加进群的那一刻就把 chat_id 记进日志 ——
+        // 私有群的 id 无法从邀请链接反查，而临时停机去 getUpdates 捞一次
+        // 每换一次群就要重来一遍。
+        allowed_updates: ["message", "callback_query", "my_chat_member"],
       });
     } catch (e) {
       console.error("拉取更新失败，5 秒后重试:", e.message);

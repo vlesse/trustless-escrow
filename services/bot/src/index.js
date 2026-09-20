@@ -119,8 +119,27 @@ async function main() {
   );
 
   log("开始接收消息");
+  /*
+   * 群/频道的 chat_id 记一行日志。
+   *
+   * 私有群的 id 没法从邀请链接反查，而 getUpdates 又和机器人自己的长轮询
+   * 互斥（并发会被 Telegram 用 409 顶掉）。结果是：要配一个广播群，
+   * 就得先把机器人停掉去捞一次 id —— 这件事每换一次群都要重来一遍。
+   *
+   * 记一行就解决了。每个群只记一次，不会刷屏。
+   */
+  const seenChats = new Set();
+  const noteChat = (chat) => {
+    if (!chat || chat.type === "private" || seenChats.has(chat.id)) return;
+    seenChats.add(chat.id);
+    log(`收到来自${chat.type === "channel" ? "频道" : "群"}「${chat.title ?? "?"}」的消息，` +
+      `chat_id=${chat.id}${chat.username ? " (@" + chat.username + ")" : ""}` +
+      ` —— 要让它接收抽选预警广播，把这个值填进 ALERT_CHAT_ID`);
+  };
+
   for await (const u of updates()) {
     try {
+      noteChat(u.message?.chat ?? u.my_chat_member?.chat ?? u.channel_post?.chat);
       if (u.message) await onMessage(u.message);
       else if (u.callback_query) await onCallback(u.callback_query);
     } catch (e) {
