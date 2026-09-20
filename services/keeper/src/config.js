@@ -40,7 +40,12 @@ export const config = {
   /// 会花钱的服务，默认值应当是「不花钱」。
   dryRun: bool("DRY_RUN", true),
 
-  pollIntervalMs: num("POLL_INTERVAL_MS", 60_000),
+  /// 轮询间隔。**这个值和链的出块速度绑死**，不是随便调的性能参数：
+  /// drawJurors 依赖 blockhash(drawBlock)，而 blockhash 只能回溯 256 个区块，
+  /// 在 BSC（约 0.45s 出块）上这个窗口只有 115 秒。间隔太长会让抽选
+  /// 反复过期重排，一路耗到 ROUND_TIMEOUT 以拒裁收场，且全程不报错。
+  /// 启动时 verifyConstants 会按实际出块速度核一遍。
+  pollIntervalMs: num("POLL_INTERVAL_MS", 20_000),
 
   /// 单笔交易的 gas 上限。推进类调用的成本是可预期的，
   /// 远超这个数说明链上状态和预期不符，宁可不发也不要盲目烧钱。

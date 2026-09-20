@@ -8,10 +8,10 @@
  */
 window.ESCROW_CONFIG = {
   chains: {
-    42161: {
-      name: "Arbitrum One",
-      rpcUrl: "https://arb1.arbitrum.io/rpc",
-      explorer: "https://arbiscan.io",
+    97: {
+      name: "BNB Smart Chain Testnet",
+      rpcUrl: "https://bsc-testnet-rpc.publicnode.com",
+      explorer: "https://testnet.bscscan.com",
       factory: "0x0000000000000000000000000000000000000000",
       // 信誉层（可选）。留空则页面拒绝为身份押金相关调用放行 ——
       // 无法验证目标地址时，不放行才是正确的默认。
@@ -19,7 +19,17 @@ window.ESCROW_CONFIG = {
       reputation: "",
       // 商家额度池（可选）。留空则页面拒绝为额度相关调用放行。
       merchantBond: "",
-      nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+      nativeCurrency: { name: "BNB", symbol: "tBNB", decimals: 18 },
+    },
+    56: {
+      name: "BNB Smart Chain",
+      rpcUrl: "https://bsc-dataseed.bnbchain.org",
+      explorer: "https://bscscan.com",
+      factory: "0x0000000000000000000000000000000000000000",
+      identityBond: "",
+      reputation: "",
+      merchantBond: "",
+      nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
     },
     31337: {
       name: "本地测试链",

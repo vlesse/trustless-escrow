@@ -14,7 +14,19 @@ function accounts(name) {
   return [k.startsWith("0x") ? k : `0x${k}`];
 }
 
-/** @type import('hardhat/config').HardhatUserConfig */
+/**
+ * 目标链是 BNB Chain。
+ *
+ * 选它的过程可以用 scripts/chain-cost.cjs 复现：按「买卖双方各自的 gas
+ * + 1% 手续费」占单额的比例算，BSC 几乎没有最小单额下限，
+ * 而 TRON 要 $1500 起、以太坊主网更高。用户群手里是 TRC20 的 USDT，
+ * TRON 那条腿以后再补，专门承大单。
+ *
+ * 测试网必须和目标主网同一条：gas 模型、区块时间、重组行为都不一样，
+ * 换条链测出来的成本和时序不能外推到上线后。
+ *
+ * @type import('hardhat/config').HardhatUserConfig
+ */
 module.exports = {
   solidity: {
     version: "0.8.26",
@@ -22,16 +34,14 @@ module.exports = {
   },
   paths: { sources: "./contracts", tests: "./test", cache: "./cache", artifacts: "./artifacts" },
   networks: {
-    // 测试网必须和目标主网同一条链：gas 模型、区块时间、L1 数据费、重组行为
-    // 都不一样，换一条链测出来的数字不能外推到上线后的成本和时序。
-    arbitrumSepolia: {
-      url: process.env.ARBITRUM_SEPOLIA_RPC_URL || "https://sepolia-rollup.arbitrum.io/rpc",
-      chainId: 421614,
+    bscTestnet: {
+      url: process.env.BSC_TESTNET_RPC_URL || "https://bsc-testnet-rpc.publicnode.com",
+      chainId: 97,
       accounts: accounts("DEPLOYER_PRIVATE_KEY"),
     },
-    arbitrumOne: {
-      url: process.env.ARBITRUM_RPC_URL || "https://arb1.arbitrum.io/rpc",
-      chainId: 42161,
+    bsc: {
+      url: process.env.BSC_RPC_URL || "https://bsc-dataseed.bnbchain.org",
+      chainId: 56,
       accounts: accounts("DEPLOYER_PRIVATE_KEY"),
     },
   },

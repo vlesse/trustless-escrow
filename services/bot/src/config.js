@@ -28,7 +28,7 @@ export const config = {
   botToken: req("TELEGRAM_BOT_TOKEN"),
 
   rpcUrl: req("RPC_URL"),
-  chainId: num("CHAIN_ID", 42161),
+  chainId: num("CHAIN_ID", 97),
   escrowFactory: addr("ESCROW_FACTORY"),
 
   /// 签名页地址。机器人把构造好的交易请求编码进链接，
@@ -36,7 +36,7 @@ export const config = {
   signingPageUrl: process.env.SIGNING_PAGE_URL ?? "",
 
   /// 区块浏览器，用于生成可点击的地址/交易链接
-  explorerUrl: (process.env.EXPLORER_URL ?? "https://arbiscan.io").replace(/\/$/, ""),
+  explorerUrl: (process.env.EXPLORER_URL ?? "https://testnet.bscscan.com").replace(/\/$/, ""),
 
   /// 单用户每分钟最多处理多少条消息。
   /// 机器人会替用户读链、算哈希，无限制会被轻易打爆。

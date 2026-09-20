@@ -97,7 +97,7 @@ export async function readDeal(provider, address, reputation) {
 /// 合约里的窗口常量与 tasks.js 里写死的那几个必须一致。
 /// 不一致的后果是 keeper 推早了（白白 revert）或推晚了（资金多压几天），
 /// 两种都不报错，所以启动时主动核对一次。
-export async function verifyConstants({ jury, optimistic }, expected) {
+export async function verifyConstants({ jury, optimistic, provider }, expected) {
   const problems = [];
   if (jury) {
     const v = Number(await jury.ROUND_TIMEOUT());
@@ -109,5 +109,45 @@ export async function verifyConstants({ jury, optimistic }, expected) {
     if (p !== expected.PROPOSAL_WINDOW) problems.push(`PROPOSAL_WINDOW 链上=${p} 本地=${expected.PROPOSAL_WINDOW}`);
     if (c !== expected.CHALLENGE_WINDOW) problems.push(`CHALLENGE_WINDOW 链上=${c} 本地=${expected.CHALLENGE_WINDOW}`);
   }
+
+  // 抽选窗口够不够我们轮询一次。
+  //
+  // drawJurors 要读 blockhash(drawBlock)，而 blockhash 只能回溯 256 个区块。
+  // 这个窗口有多长完全取决于链的出块速度：以太坊 12 秒出块时有 51 分钟，
+  // BSC 0.45 秒出块时只剩 115 秒，Arbitrum 0.25 秒时只剩 66 秒。
+  //
+  // 轮询间隔一旦接近窗口长度，抽选就会反复过期、反复重排，一路耗到
+  // ROUND_TIMEOUT 以拒裁收场 —— **而且全程不报任何错**：链上有兜底重排，
+  // keeper 那边每次都是「条件没到」。所以只能在启动时算一次。
+  if (jury && provider && config.pollIntervalMs) {
+    const window = await blockhashWindowSeconds(provider);
+    if (window !== null) {
+      const poll = config.pollIntervalMs / 1000;
+      // 留三倍余量：轮询可能正好卡在窗口刚开的前一刻，再加上 RPC 抖动和重试。
+      if (poll * 3 > window) {
+        problems.push(
+          `轮询间隔 ${poll}s 相对抽选窗口 ${window.toFixed(0)}s 太长` +
+          `（本链约 ${(window / 256).toFixed(3)}s 出块，256 块就过期）。` +
+          `把 POLL_INTERVAL_MS 降到 ${Math.floor((window / 3) * 1000 / 1000) * 1000} 以下。`
+        );
+      }
+    }
+  }
   return problems;
+}
+
+/// 按最近的出块速度估算 blockhash 的有效窗口（秒）。取不到时返回 null，
+/// 让调用方跳过这项检查而不是编一个数出来。
+async function blockhashWindowSeconds(provider) {
+  try {
+    const head = await provider.getBlockNumber();
+    const span = Math.min(1000, head);
+    if (span < 10) return null; // 新链还没出够块，估不准
+    const [a, b] = await Promise.all([provider.getBlock(head - span), provider.getBlock(head)]);
+    const dt = (Number(b.timestamp) - Number(a.timestamp)) / span;
+    if (!(dt > 0)) return null;
+    return 256 * dt;
+  } catch {
+    return null;
+  }
 }
