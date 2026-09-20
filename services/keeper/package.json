@@ -1,0 +1,17 @@
+{
+  "name": "@trustless-escrow/keeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "推动协议里那些「任何人都可以做、但没人会主动做」的步骤",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dry-run": "DRY_RUN=true node src/index.js",
+    "once": "node src/index.js --once",
+    "test": "node --test test/keeper.test.js test/abi.test.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  }
+}

@@ -192,7 +192,9 @@ async function main() {
   console.log('     跑稳一段时间再往上放 —— 没有审计预算时这是唯一能真实封住下行的东西');
   console.log('  8. 想接抽选风险预警：把陪审团地址填进机器人的 STAKED_JURY，');
   console.log('     并把 ALERT_CHAT_ID 指向一个公开频道 —— 私发给运营方等于把单点请回来');
-  console.log('  9. 承载真实资金前必须完成第三方安全审计');
+  console.log('  9. **跑一个 keeper**（services/keeper）。陪审团那四步是无需许可的，');
+  console.log('     但无需许可不等于会有人做 —— 没有它，争议会一直卡到兜底超时，然后以拒裁收场');
+  console.log(' 10. 承载真实资金前必须完成第三方安全审计');
 }
 
 main().catch((e) => {
