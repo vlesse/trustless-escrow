@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人人担保 · 非托管担保交易协议</title>
+<meta name="description" content="一个不托管资金的担保交易协议。钱锁在链上合约里，运营方碰不到。所有数字实时读自链上。">
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🔒</text></svg>">
+</head>
+<body>
+
+<header class="bar">
+  <div class="wrap bar-in">
+    <span class="logo" data-i18n="brand">人人担保</span>
+    <nav>
+      <a href="#numbers" data-i18n="nav.numbers">链上数据</a>
+      <a href="#trust" data-i18n="nav.trust">为何不必信任我们</a>
+      <a href="#how" data-i18n="nav.how">怎么用</a>
+      <a href="#risk" data-i18n="nav.risk">风险</a>
+      <a href="#contracts" data-i18n="nav.contracts">合约</a>
+    </nav>
+    <button id="lang" class="lang" type="button">EN</button>
+  </div>
+</header>
+
+<div class="warn">
+  <div class="wrap" data-i18n="banner">
+    测试网运行中 · 未经第三方安全审计 · 请勿投入真实资金
+  </div>
+</div>
+
+<main>
+
+<section class="hero wrap">
+  <h1 data-i18n="hero.h1">担保交易，但没有一个能拿走你钱的人</h1>
+  <p class="lead" data-i18n="hero.lead">
+    钱锁在一份链上合约里，只能按写死的规则流向买家或卖家。运营方没有任何一个函数可以把它取走——
+    这不是承诺，是合约里不存在那段代码。
+  </p>
+  <div class="cta">
+    <a class="btn primary" href="https://t.me/Renrendb_bot" target="_blank" rel="noopener"
+       data-i18n="hero.bot">在 Telegram 上开一单</a>
+    <a class="btn" href="https://github.com/vlesse/trustless-escrow" target="_blank" rel="noopener"
+       data-i18n="hero.src">读源码</a>
+  </div>
+</section>
+
+<section id="numbers" class="wrap">
+  <h2 data-i18n="num.h2">链上数据</h2>
+  <p class="sub" data-i18n="num.sub">
+    下面每一个数字都由你的浏览器直接向 BSC 节点查询得到，不经过我们的任何服务器。
+    页面里没有后端，也就没有可以被我们改写的中间层。
+  </p>
+
+  <div class="grid">
+    <div class="card"><div class="k" data-i18n="num.deals">累计交易</div><div class="v" id="n-deals">—</div></div>
+    <div class="card"><div class="k" data-i18n="num.locked">当前锁定</div><div class="v" id="n-locked">—</div></div>
+    <div class="card"><div class="k" data-i18n="num.disputes">争议 / 其中被挑战</div><div class="v" id="n-disputes">—</div></div>
+    <div class="card"><div class="k" data-i18n="num.jurors">陪审员 / 总质押</div><div class="v" id="n-jurors">—</div></div>
+  </div>
+
+  <h3 data-i18n="rev.h3">协议收入</h3>
+  <p class="sub" data-i18n="rev.sub">
+    手续费按成交额的百分比收取，全部进入 FeeVault 合约。受益地址在部署时写入且
+    <strong>永久不可更改</strong>。累计 = 已提走 + 金库当前余额 ——
+    这两个数只能由真实的代币移动产生，任何人都伪造不了。
+  </p>
+  <div class="grid three">
+    <div class="card"><div class="k" data-i18n="rev.total">累计收取</div><div class="v" id="n-fee-total">—</div></div>
+    <div class="card"><div class="k" data-i18n="rev.swept">已提走</div><div class="v" id="n-fee-swept">—</div></div>
+    <div class="card"><div class="k" data-i18n="rev.pending">尚未提取</div><div class="v" id="n-fee-pending">—</div></div>
+  </div>
+  <p class="note">
+    <span data-i18n="rev.bene">受益地址</span>
+    <a id="bene-link" class="mono" href="#" target="_blank" rel="noopener">—</a>
+    <span class="tag" data-i18n="rev.immutable">immutable</span>
+  </p>
+
+  <p class="stamp" id="stamp"></p>
+</section>
+
+<section id="trust" class="wrap">
+  <h2 data-i18n="trust.h2">为什么你不必信任我们</h2>
+  <p class="sub" data-i18n="trust.sub">
+    每一条都对应一个你能自己去链上核实的事实，不是一句保证。
+  </p>
+  <ol class="reasons">
+    <li>
+      <h4 data-i18n="t1.h">资金非托管</h4>
+      <p data-i18n="t1.p">每一笔交易是一个独立的合约实例。资金只能按合约写死的路径流向买家或卖家。
+        运营方不是任何一个转账函数的合法调用者——不是"我们承诺不动"，是想动也没有入口。</p>
+    </li>
+    <li>
+      <h4 data-i18n="t2.h">逻辑不可升级</h4>
+      <p data-i18n="t2.p">托管逻辑是一份 immutable 的实现合约，每个交易实例都是它的极简克隆。
+        没有代理、没有升级入口、没有"以后再改"。你今天读到的代码就是它将来执行的代码。</p>
+    </li>
+    <li>
+      <h4 data-i18n="t3.h">我们的收入也在链上</h4>
+      <p data-i18n="t3.p">手续费的受益地址在部署时写死，immutable。上面那个"协议收入"不是我们填的数字，
+        是从合约账本读出来的。我们赚了多少，你和我们同时知道。</p>
+    </li>
+    <li>
+      <h4 data-i18n="t4.h">AI 只是默认值，不是权威</h4>
+      <p data-i18n="t4.p">争议先由一个 AI 提出裁决，并为此质押保证金。任何人——不限身份——都可以质押等额保证金
+        推翻它，把案子升级到质押陪审团。推翻一个错判是有利可图的。这就是它不构成单点的原因。</p>
+    </li>
+    <li>
+      <h4 data-i18n="t5.h">推进不需要许可</h4>
+      <p data-i18n="t5.p">陪审团流程的每一步（抽签、开揭示、计票、结案）任何人都能触发。
+        我们跑着一个推进器，但它的作用是"有人在做"，不是"只有它能做"。它下线，流程照样能被别人推完。</p>
+    </li>
+    <li>
+      <h4 data-i18n="t6.h">仲裁层失联也不会锁死你的钱</h4>
+      <p data-i18n="t6.p">争议提起后若长时间无人裁决，任何人都可以触发中性拆分，资金原路退回，
+        且不向失职的仲裁层支付任何费用。资金不会因为我们出事而卡在链上。</p>
+    </li>
+  </ol>
+</section>
+
+<section id="how" class="wrap">
+  <h2 data-i18n="how.h2">怎么用</h2>
+  <ol class="steps">
+    <li><h4 data-i18n="h1.h">在机器人里开单</h4>
+        <p data-i18n="h1.p">买卖双方谈好条款，任一方在 Telegram 机器人里发起。开单本身不锁定任何资金。</p></li>
+    <li><h4 data-i18n="h2.h">双方入金</h4>
+        <p data-i18n="h2.p">买家存货款和押金，卖家存押金。机器人给出签名链接，签名在你自己的钱包里完成——
+          它从头到尾不接触你的私钥。</p></li>
+    <li><h4 data-i18n="h3.h">交付与验收</h4>
+        <p data-i18n="h3.p">卖家标记发货，买家确认收货即结算：押金原路退回，货款扣手续费给卖家。
+          验收期内买家不表态则自动放行。</p></li>
+    <li><h4 data-i18n="h4.h">谈不拢就进仲裁</h4>
+        <p data-i18n="h4.p">任一方可提起争议。AI 先给默认裁决，48 小时内无人挑战即生效；
+          被挑战则升级到质押陪审团，承诺-揭示投票、可上诉三轮。</p></li>
+  </ol>
+</section>
+
+<section id="risk" class="wrap">
+  <h2 data-i18n="risk.h2">风险与限制</h2>
+  <p class="sub" data-i18n="risk.sub">这一节写得直白，是因为把它写漂亮对你没有任何好处。</p>
+  <ul class="risks">
+    <li><strong data-i18n="r1.h">未经第三方安全审计。</strong>
+        <span data-i18n="r1.p">这是目前最大的风险，没有之一。合约有完整的测试，但测试证明的是
+          "我们想到的情况没问题"，审计找的是我们没想到的。在审计完成前，不要投入你输不起的钱。</span></li>
+    <li><strong data-i18n="r2.h">AI 会判错。</strong>
+        <span data-i18n="r2.p">约束它的是保证金和开放的挑战权，不是准确率。
+          如果一个错判没有任何人去挑战，它就会生效。</span></li>
+    <li><strong data-i18n="r3.h">陪审团不是法庭。</strong>
+        <span data-i18n="r3.p">它是质押加权的随机抽选加多数决。它能抵御小额贿赂，
+          抵不住相对案值足够大的贿赂。高价值交易请自行判断。</span></li>
+    <li><strong data-i18n="r4.h">链上没有撤销键。</strong>
+        <span data-i18n="r4.p">地址填错、条款哈希对不上、签错了交易，都没有客服可以找。
+          签名前请核对签名页显示的目标合约。</span></li>
+    <li><strong data-i18n="r5.h">目前在测试网。</strong>
+        <span data-i18n="r5.p">上面的数字来自 BSC 测试网，代币没有价值，数据随时可能失效。</span></li>
+  </ul>
+</section>
+
+<section id="contracts" class="wrap">
+  <h2 data-i18n="c.h2">合约地址</h2>
+  <p class="sub" data-i18n="c.sub">
+    全部部署在 BNB Smart Chain 测试网（链 ID 97）。点开即可在区块浏览器上核对。
+  </p>
+  <table class="addrs"><tbody id="addr-rows"></tbody></table>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <p>
+      <a href="https://t.me/Renrendb_bot" target="_blank" rel="noopener">@Renrendb_bot</a> ·
+      <a href="https://db.renrenyings.net" target="_blank" rel="noopener" data-i18n="foot.sign">签名页</a> ·
+      <a href="https://github.com/vlesse/trustless-escrow" target="_blank" rel="noopener" data-i18n="foot.src">源码</a>
+    </p>
+    <p class="fine" data-i18n="foot.fine">
+      本站不提供投资建议，也不对任何一笔交易的结果负责。协议是一套规则，不是一个担保人。
+    </p>
+  </div>
+</footer>
+
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="chain.js"></script>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

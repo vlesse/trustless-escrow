@@ -1,0 +1,105 @@
+/*
+ * 刻意朴素。一个讲「你不必信任我们」的页面，如果自己先靠视觉包装去建立信任，
+ * 那它论证的东西和它呈现的方式就是矛盾的。
+ * 数字用等宽字体：它们是这页的主角，要一眼能对齐、能比对。
+ */
+:root {
+  --bg: #0d0f12;
+  --panel: #16191e;
+  --line: #262b33;
+  --fg: #e6e9ee;
+  --dim: #9aa4b2;
+  --accent: #f0b90b;      /* BNB 黄 —— 提示链，不是品牌 */
+  --warn-bg: #3a2a08;
+  --warn-fg: #f5cd58;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #ffffff; --panel: #f6f7f9; --line: #e2e5ea;
+    --fg: #14171c; --dim: #5b6572; --warn-bg: #fdf3d6; --warn-fg: #6b5307;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 16px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 880px; margin: 0 auto; padding: 0 16px; }
+a { color: inherit; }
+
+/* ---- 顶栏 ---- */
+.bar { position: sticky; top: 0; z-index: 10; background: var(--bg);
+       border-bottom: 1px solid var(--line); }
+.bar-in { display: flex; align-items: center; gap: 16px; height: 56px; }
+.logo { font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+.bar nav { display: flex; gap: 18px; margin-left: auto; overflow-x: auto; }
+.bar nav a { color: var(--dim); text-decoration: none; font-size: 14px; white-space: nowrap; }
+.bar nav a:hover { color: var(--fg); }
+.lang { background: none; border: 1px solid var(--line); color: var(--dim);
+        border-radius: 6px; padding: 4px 10px; font-size: 13px; cursor: pointer; }
+.lang:hover { color: var(--fg); border-color: var(--dim); }
+@media (max-width: 720px) { .bar nav { display: none; } }
+
+/* ---- 警示条 ---- */
+.warn { background: var(--warn-bg); color: var(--warn-fg);
+        font-size: 14px; padding: 10px 0; text-align: center; }
+
+/* ---- 内容 ---- */
+main { padding-bottom: 48px; }
+section { padding: 48px 0 8px; }
+h1 { font-size: clamp(26px, 5vw, 38px); line-height: 1.3; margin: 0 0 16px; }
+h2 { font-size: 22px; margin: 0 0 8px; }
+h3 { font-size: 17px; margin: 36px 0 6px; }
+h4 { font-size: 16px; margin: 0 0 4px; }
+.lead { font-size: 17px; color: var(--dim); margin: 0 0 24px; max-width: 62ch; }
+.sub { color: var(--dim); font-size: 15px; margin: 0 0 20px; max-width: 68ch; }
+.note { font-size: 14px; color: var(--dim); margin-top: 14px; }
+.stamp { font-size: 13px; color: var(--dim); margin-top: 22px; font-family: var(--mono); }
+
+.cta { display: flex; gap: 12px; flex-wrap: wrap; }
+.btn { display: inline-block; padding: 10px 18px; border-radius: 8px;
+       border: 1px solid var(--line); text-decoration: none; font-size: 15px; }
+.btn:hover { border-color: var(--dim); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #17181a; font-weight: 600; }
+
+/* ---- 数字卡 ---- */
+.grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.grid.three { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line);
+        border-radius: 10px; padding: 16px; }
+.card .k { font-size: 13px; color: var(--dim); margin-bottom: 6px; }
+.card .v { font-family: var(--mono); font-size: 21px; font-variant-numeric: tabular-nums;
+           word-break: break-all; }
+.tag { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line);
+       border-radius: 4px; padding: 1px 6px; color: var(--dim); margin-left: 6px; }
+.mono { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+
+/* ---- 列表 ---- */
+.reasons, .steps { list-style: none; counter-reset: n; padding: 0; margin: 0; }
+.reasons li, .steps li { counter-increment: n; position: relative;
+                         padding: 16px 0 16px 46px; border-top: 1px solid var(--line); }
+.reasons li::before, .steps li::before {
+  content: counter(n); position: absolute; left: 0; top: 16px;
+  width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
+  display: grid; place-items: center; font-family: var(--mono);
+  font-size: 13px; color: var(--dim);
+}
+.reasons p, .steps p { margin: 0; color: var(--dim); font-size: 15px; }
+.risks { padding-left: 20px; margin: 0; }
+.risks li { margin-bottom: 12px; color: var(--dim); font-size: 15px; }
+.risks strong { color: var(--fg); }
+
+/* ---- 地址表 ---- */
+.addrs { width: 100%; border-collapse: collapse; font-size: 14px; }
+.addrs td { border-top: 1px solid var(--line); padding: 10px 8px 10px 0; vertical-align: top; }
+.addrs td:first-child { color: var(--dim); white-space: nowrap; padding-right: 18px; }
+.addrs a { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+
+/* ---- 页脚 ---- */
+footer { border-top: 1px solid var(--line); padding: 28px 0 40px; }
+.foot p { margin: 0 0 8px; font-size: 14px; }
+.fine { color: var(--dim); font-size: 13px; max-width: 62ch; }
