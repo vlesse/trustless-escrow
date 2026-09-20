@@ -8,3 +8,4 @@ out/
 # 自审工具输出
 slither.json
 slither.txt
+.testnet-wallets.json
