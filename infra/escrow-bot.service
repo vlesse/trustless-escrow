@@ -1,0 +1,25 @@
+[Unit]
+Description=Trustless Escrow Telegram bot (BSC testnet)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=escrow
+WorkingDirectory=/srv/escrow/services/bot
+EnvironmentFile=/srv/escrow/services/bot/.env
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/srv/escrow/logs/bot.log
+StandardError=append:/srv/escrow/logs/bot.log
+# 机器人永远不接触私钥：它只构造 calldata，签名在用户自己的钱包里完成。
+# 所以这个进程里没有任何值钱的东西，按最小权限跑即可。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/escrow/services/bot /srv/escrow/logs
+
+[Install]
+WantedBy=multi-user.target
