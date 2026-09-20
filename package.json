@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "build": "node scripts/compile.mjs",
-    "test": "hardhat test"
+    "test": "hardhat test",
+    "test:site": "node --test site/test/site.test.js"
   },
   "dependencies": {
     "solc": "^0.8.26"
