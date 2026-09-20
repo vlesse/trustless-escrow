@@ -17,11 +17,13 @@
 import { ethers } from "ethers";
 import { fmtAmount } from "./deals.js";
 import { esc } from "./telegram.js";
+import { getLogs, blockTimeSeconds, DEFAULT_MAX_RANGE } from "./logs.js";
 
 export const JURY_ALERT_ABI = [
   "event CaseCreated(uint256 indexed id, address indexed arbitrable, uint64 drawBlock, uint256 value)",
   "event JurorsDrawn(uint256 indexed id, uint256 indexed round, address[] drawn, uint64 commitDeadline)",
   "event Staked(address indexed juror, uint256 amount, uint256 total)",
+  "function cases(uint256 id) view returns (tuple(address arbitrable,address feeToken,uint8 phase,uint8 ruling,uint64 drawBlock,uint64 commitDeadline,uint64 revealDeadline,uint64 appealDeadline,uint64 roundStartedAt,uint64 createdAt,uint64 rngRequestedAt,address rngSource,address dealBuyer,address dealSeller,uint256 value,uint256 baseCost))",
   "function juryCoverage() view returns (uint256)",
   "function totalStake() view returns (uint256)",
   "function stakeOf(address who) view returns (uint256)",
@@ -29,6 +31,10 @@ export const JURY_ALERT_ABI = [
 
 /// 抽签前多久的新质押算「为这个案子而来」。
 export const FRESH_STAKE_WINDOW = 3 * 24 * 3600;
+
+/// 回溯新质押时最多切几片。BSC 上三天约 57.6 万个区块，按每片 20000 算是 29 片；
+/// 留 40 片的余量，再长就只查一部分并在告警里说明，而不是默默少报。
+export const MAX_FRESH_LOOKBACK_CHUNKS = 40;
 
 /// 抽中席位的质押占全池比例超过这个数，就意味着买通他们几乎等于买通全池。
 export const CONCENTRATION_THRESHOLD = 0.5;
@@ -133,17 +139,42 @@ export async function collectDraw({ jury, id, round, drawn, value, provider, now
   // 抽签前不久押进来的地址。窗口内的 Staked 事件足够定位，
   // 不需要逐个回溯每个人的全部历史。
   const freshStakers = new Set();
+  let freshWindowPartial = false;
   try {
     const latest = await provider.getBlockNumber();
-    const events = await c.queryFilter(c.filters.Staked(), Math.max(0, latest - 50000), latest);
-    for (const ev of events) {
-      if (!unique.includes(ev.args.juror)) continue;
-      const blk = await provider.getBlock(ev.blockNumber);
+
+    /*
+     * 「三天内押进来的」要换算成区块数才能查日志，而换算系数在不同链上差
+     * 两个数量级：以太坊 12 秒一块，BSC 0.45 秒一块。
+     *
+     * 原来这里写死回溯 50000 个区块。在 BSC 上那只有六个多小时 ——
+     * 名义上查三天，实际上漏掉其中 92%，而且不会报任何错。
+     * 这和固定 200000 那处是同一类错误：把区块数当成了时间单位。
+     */
+    const dt = (await blockTimeSeconds(provider)) ?? 12;
+    const want = Math.ceil(FRESH_STAKE_WINDOW / dt);
+    const cap = MAX_FRESH_LOOKBACK_CHUNKS * DEFAULT_MAX_RANGE;
+    const span = Math.min(want, cap);
+    freshWindowPartial = span < want;
+
+    const iface = new ethers.Interface(JURY_ALERT_ABI);
+    const logs = await getLogs({
+      provider,
+      filter: { address: jury, topics: [iface.getEvent("Staked").topicHash] },
+      fromBlock: Math.max(0, latest - span),
+      toBlock: latest,
+    });
+    for (const log of logs) {
+      const ev = iface.parseLog(log);
+      if (!ev || !unique.includes(ev.args.juror)) continue;
+      const blk = await provider.getBlock(log.blockNumber);
       if (now - blk.timestamp <= FRESH_STAKE_WINDOW) freshStakers.add(ev.args.juror);
     }
   } catch {
-    // 拿不到历史就不报这一条，而不是把整条告警丢掉
+    // 拿不到历史就不报这一条，而不是把整条告警丢掉。
+    // 但「没查到」和「查不了」不是一回事，下面用 freshWindowPartial 区分。
+    freshWindowPartial = true;
   }
 
-  return { value, coverage, drawn, stakeByJuror, totalStake, freshStakers };
+  return { value, coverage, drawn, stakeByJuror, totalStake, freshStakers, freshWindowPartial };
 }

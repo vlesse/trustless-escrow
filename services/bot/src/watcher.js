@@ -4,6 +4,7 @@ import * as session from "./session.js";
 import { makeProvider, loadDeal, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
 import * as juryalert from "./juryalert.js";
 import { esc } from "./telegram.js";
+import { ranges, getLogs as getLogsChunked } from "./logs.js";
 
 /// 链上事件推送。
 ///
@@ -32,6 +33,7 @@ const ESCROW_EVENTS = [
 
 const escrowIface = new ethers.Interface(ESCROW_EVENTS);
 const factoryIface = new ethers.Interface(FACTORY_EVENTS);
+const juryIface = new ethers.Interface(juryalert.JURY_ALERT_ABI);
 
 /// 等待确认数再推送。
 ///
@@ -150,9 +152,12 @@ export function describeDeadline(deal, kind, remaining) {
 
 /// 发现与已绑定用户相关的交易。
 async function discoverDeals(fromBlock, toBlock, tracked) {
-  const logs = await provider.getLogs({
-    address: config.escrowFactory,
-    topics: [factoryIface.getEvent("DealCreated").topicHash],
+  const logs = await getLogsChunked({
+    provider,
+    filter: {
+      address: config.escrowFactory,
+      topics: [factoryIface.getEvent("DealCreated").topicHash],
+    },
     fromBlock, toBlock,
   });
 
@@ -181,8 +186,9 @@ async function pushTo(notify, deal, target, text) {
 async function processEvents(notify, tracked, fromBlock, toBlock) {
   if (tracked.size === 0) return;
 
-  const logs = await provider.getLogs({
-    address: [...tracked],
+  const logs = await getLogsChunked({
+    provider,
+    filter: { address: [...tracked] },
     fromBlock, toBlock,
   });
 
@@ -255,14 +261,18 @@ async function scanDraws(notify, fromBlock, toBlock) {
 
   try {
     const jury = new ethers.Contract(config.stakedJury, juryalert.JURY_ALERT_ABI, provider);
-    const drawnEvents = await jury.queryFilter(jury.filters.JurorsDrawn(), fromBlock, toBlock);
+    const drawnLogs = await getLogsChunked({
+      provider,
+      filter: { address: config.stakedJury, topics: [juryIface.getEvent("JurorsDrawn").topicHash] },
+      fromBlock, toBlock,
+    });
+    const drawnEvents = drawnLogs.map((l) => juryIface.parseLog(l)).filter(Boolean);
     if (drawnEvents.length === 0) return;
 
-    // 案值只在 CaseCreated 里，抽选事件本身没有。往回捞一段拿到它。
-    const created = await jury.queryFilter(
-      jury.filters.CaseCreated(), Math.max(0, fromBlock - 200000), toBlock
-    );
-    const valueOf = new Map(created.map((e) => [e.args.id.toString(), e.args.value]));
+    // 案值直接从合约读，不再回捞 CaseCreated 日志。
+    // 原来那段固定回溯 200000 个区块，而公共 RPC 的单次上限是 50000 ——
+    // 它从来就没成功过，整个预警功能一直是静默失效的。
+    // 一次 cases(id) 调用既没有跨度限制，拿到的也是当前值而不是创建时的快照。
     const now = Math.floor(Date.now() / 1000);
 
     for (const ev of drawnEvents) {
@@ -270,11 +280,12 @@ async function scanDraws(notify, fromBlock, toBlock) {
       const key = `draw:${config.stakedJury}:${id}:${ev.args.round}`;
       if (session.alreadyNotified(key)) continue;
 
+      const value = await jury.cases(ev.args.id).then((c) => c.value).catch(() => 0n);
       const data = await juryalert.collectDraw({
         jury: config.stakedJury,
         id, round: Number(ev.args.round),
         drawn: [...ev.args.drawn],
-        value: valueOf.get(id) ?? 0n,
+        value,
         provider, now,
       });
       const assessment = juryalert.assessDraw(data);
@@ -303,14 +314,26 @@ export async function start(notify) {
       const safe = head - CONFIRMATIONS;
       if (safe <= last) return;
 
-      await discoverDeals(last + 1, safe, tracked);
-      await processEvents(notify, tracked, last + 1, safe);
+      /*
+       * 游标必须**逐片**推进，不能等整段扫完再一次性推进。
+       *
+       * 单次 eth_getLogs 有区块跨度上限，所以一段长区间本来就要切片扫。
+       * 若失败时游标退回起点，那么停机超过一个切片宽度之后，每一轮都会
+       * 从同一个位置重新开始、在同一个地方失败 —— 不是「慢慢追上来」，
+       * 是永久卡死，而且只在日志里留一行。
+       *
+       * 一片扫完就推进一片，最坏情况只是重扫最后那一片；而事件推送本来
+       * 就按 txHash+logIndex 去重，重扫不会重复打扰用户。
+       */
+      for (const [lo, hi] of ranges(last + 1, safe)) {
+        await discoverDeals(lo, hi, tracked);
+        await processEvents(notify, tracked, lo, hi);
+        await scanDraws(notify, lo, hi);
+        last = hi;
+      }
       await checkDeadlines(notify, tracked);
-      await scanDraws(notify, last + 1, safe);
-
-      last = safe;
     } catch (e) {
-      console.error("监听轮询失败:", e.message);
+      console.error("监听轮询失败:", e.message, "（游标停在", last, "，下一轮从这里继续）");
     }
   };
 
