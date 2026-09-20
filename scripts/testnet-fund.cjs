@@ -49,13 +49,24 @@ async function read(label, fn, tries = 5) {
   throw last;
 }
 
-/** 发出去之后只按哈希等，等不到就再等，永远不重发。 */
+/**
+ * 发出去之后只按哈希轮询回执，永远不重发。
+ *
+ * 不用 waitForTransaction：hardhat 包装过的 provider 没实现它。
+ * 而且自己轮询反而更贴合这里的需求 —— 每次查询都是独立的读操作，
+ * 单次超时不影响下一次，也不会把「还没打包」和「RPC 断了」混为一谈。
+ */
 async function confirm(tx) {
-  return read("等回执", async () => {
-    const rc = await ethers.provider.waitForTransaction(tx.hash, 1, 90_000);
-    if (!rc) throw Object.assign(new Error("回执未出"), { code: "TIMEOUT" });
-    return rc;
-  });
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const rc = await read("查回执", () => ethers.provider.getTransactionReceipt(tx.hash));
+    if (rc) {
+      if (rc.status !== 1) throw new Error("交易 " + tx.hash + " 被回滚");
+      return rc;
+    }
+    await sleep(1200);
+  }
+  throw Object.assign(new Error("回执 " + tx.hash + " 两分钟没出"), { code: "TIMEOUT" });
 }
 
 async function main() {
