@@ -56,8 +56,15 @@ export function makeClients() {
   };
 }
 
+/**
+ * 读一个案件。
+ *
+ * ethers v6 对**单返回值**的函数直接返回那个值，不会再包一层。
+ * ABI 里给返回值起了名字（`... c`）也不改变这一点 —— 写成 `(...).c`
+ * 拿到的永远是 undefined，而 undefined.phase 要等到真的连上链才炸。
+ */
 export async function readJuryCase(jury, id) {
-  const c = (await jury.cases(id)).c;
+  const c = await jury.cases(id);
   return {
     id,
     phase: Number(c.phase),
@@ -69,8 +76,9 @@ export async function readJuryCase(jury, id) {
   };
 }
 
+/// 同上：单返回值不包一层。
 export async function readDispute(optimistic, id) {
-  const d = (await optimistic.disputes(id)).d;
+  const d = await optimistic.disputes(id);
   return {
     id,
     status: Number(d.status),
