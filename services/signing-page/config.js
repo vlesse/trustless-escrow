@@ -12,11 +12,11 @@ window.ESCROW_CONFIG = {
       name: "BNB Smart Chain Testnet",
       rpcUrl: "https://bsc-testnet-rpc.publicnode.com",
       explorer: "https://testnet.bscscan.com",
-      factory: "0x0000000000000000000000000000000000000000",
+      factory: "0x395633EA01Da1903ED9a03e5BcF656De2Fa46D0a",
       // 信誉层（可选）。留空则页面拒绝为身份押金相关调用放行 ——
       // 无法验证目标地址时，不放行才是正确的默认。
-      identityBond: "",
-      reputation: "",
+      identityBond: "0x954a622E8c88DD46317416477d9A6835BB74786F",
+      reputation: "0x2ecD51b774f62515fb1B852F057072706947e94C",
       // 商家额度池（可选）。留空则页面拒绝为额度相关调用放行。
       merchantBond: "",
       nativeCurrency: { name: "BNB", symbol: "tBNB", decimals: 18 },
