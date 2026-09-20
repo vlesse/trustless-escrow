@@ -32,6 +32,14 @@ const BUYER_CLAIM = "data:text/plain;base64," + Buffer.from(
   "卖家发来的激活码提示「已被使用」，无法激活。已附激活失败截图与时间戳。", "utf8").toString("base64");
 
 async function main() {
+  // 重跑会在链上再造一个并行的案子。那不是「重试」，那是多了一个
+  // 同样在走 9 天流程的案件，观察 keeper 时根本分不清是哪一个。
+  if (fs.existsSync(OUT)) {
+    console.error("已存在 " + OUT + "，说明这个场景已经在链上跑着了。");
+    console.error("要开一个新的，先手工改名保存旧的。");
+    process.exit(1);
+  }
+
   const provider = ethers.provider;
   const S = (role) => new ethers.Wallet(W[role].privateKey, provider);
 
@@ -111,7 +119,7 @@ async function main() {
   const rcC = await step("challenge", () => opt.connect(challenger).challenge(optID));
   const chEv = rcC.logs.map((l) => { try { return opt.interface.parseLog(l); } catch { return null; } })
     .find((x) => x && x.name === "Challenged");
-  const caseID = chEv.args.finalID;
+  const caseID = chEv.args.finalDisputeID;
 
   const head = await read("读块高", () => provider.getBlockNumber());
   const state = {
