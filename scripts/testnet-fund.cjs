@@ -3,9 +3,14 @@
  *
  *   SETTLEMENT_TOKEN=0x... npx hardhat run scripts/testnet-fund.cjs --network bscTestnet
  *
- * 可重复执行：已经够数的地址会跳过，不会重复打。
- * 这一点很重要 —— 排查问题时往往要反复跑，每跑一次就多花一次水
- * 的脚本会逼你去省着用，而省着用是模拟真实场景最不该有的约束。
+ * 可重复执行：每个地址都是「补到目标值」，已经够数的跳过。
+ * 这一点不只是省水 —— 公共 RPC 在连发二十几笔时几乎一定会断一次，
+ * 而「补到目标值」让中断后重跑等于接着跑。
+ *
+ * 断线处理分两种，不能混：
+ *   读操作（查余额、查回执）失败可以随便重试，重试不改变链上状态。
+ *   发交易失败不能盲目重试 —— 交易可能已经广播，重发就是又花一次。
+ * 所以这里发完只按哈希等回执，绝不重发；真正的兜底是外层重跑时的余额复查。
  *
  * beneficiary 故意不给 gas：它是模拟冷钱包，只出现在 FeeVault 的构造参数里，
  * 全程不签任何交易。给它打钱反而会掩盖「这把私钥其实从没被用过」这个事实。
@@ -17,6 +22,41 @@ const path = require("path");
 const GAS_EACH = ethers.parseEther(process.env.GAS_EACH || "0.005");
 const MINT_EACH = 1_000_000n;              // 个代币，按链上精度换算
 const NO_GAS = new Set(["deployer", "beneficiary"]);
+const PASSES = 4;                          // 外层最多重跑几轮
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 网络抖动，还是合约真的拒绝了？后者重试多少次都一样。 */
+function transient(e) {
+  const code = e.code || e.cause?.code || "";
+  if (["UND_ERR_HEADERS_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "TIMEOUT", "SERVER_ERROR",
+       "NETWORK_ERROR", "ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND"].includes(code)) return true;
+  return /timeout|socket|fetch failed|ECONNRESET|502|503|504/i.test(e.message || "");
+}
+
+/** 只用来包读操作 —— 重试它们没有副作用。 */
+async function read(label, fn, tries = 5) {
+  let last;
+  for (let i = 1; i <= tries; i++) {
+    try { return await fn(); } catch (e) {
+      if (!transient(e)) throw e;
+      last = e;
+      const ms = 800 * 2 ** (i - 1);
+      console.log(`    ${label} 第 ${i} 次失败(${e.code || "timeout"})，${ms / 1000}s 后重试`);
+      await sleep(ms);
+    }
+  }
+  throw last;
+}
+
+/** 发出去之后只按哈希等，等不到就再等，永远不重发。 */
+async function confirm(tx) {
+  return read("等回执", async () => {
+    const rc = await ethers.provider.waitForTransaction(tx.hash, 1, 90_000);
+    if (!rc) throw Object.assign(new Error("回执未出"), { code: "TIMEOUT" });
+    return rc;
+  });
+}
 
 async function main() {
   const file = path.join(__dirname, "..", ".testnet-wallets.json");
@@ -26,7 +66,7 @@ async function main() {
   const tokenAddr = process.env.SETTLEMENT_TOKEN;
   if (!tokenAddr || !ethers.isAddress(tokenAddr)) throw new Error("SETTLEMENT_TOKEN 缺失或不合法");
   const token = await ethers.getContractAt("MockTokenD", tokenAddr);
-  const decimals = Number(await token.decimals());
+  const decimals = Number(await read("读精度", () => token.decimals()));
   const mintAmt = MINT_EACH * 10n ** BigInt(decimals);
 
   const [deployer] = await ethers.getSigners();
@@ -37,44 +77,52 @@ async function main() {
   }
 
   console.log("结算币", tokenAddr, `(${decimals} 位)`);
-  console.log("出资方", deployer.address,
-    ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "BNB\n");
+  console.log("出资方", deployer.address, "\n");
 
-  for (const [role, w] of Object.entries(wallets)) {
-    const line = role.padEnd(12) + w.address + "  ";
-    const parts = [];
+  for (let pass = 1; pass <= PASSES; pass++) {
+    if (pass > 1) console.log(`\n--- 第 ${pass} 轮：只处理上一轮没做完的 ---`);
+    let pending = 0;
 
-    if (!NO_GAS.has(role)) {
-      const bal = await ethers.provider.getBalance(w.address);
-      if (bal >= GAS_EACH) {
-        parts.push("gas 已有 " + ethers.formatEther(bal));
-      } else {
-        const need = GAS_EACH - bal;
-        await (await deployer.sendTransaction({ to: w.address, value: need })).wait();
-        parts.push("补 gas " + ethers.formatEther(need));
+    for (const [role, w] of Object.entries(wallets)) {
+      const parts = [];
+      try {
+        if (!NO_GAS.has(role)) {
+          const bal = await read("查 gas", () => ethers.provider.getBalance(w.address));
+          if (bal >= GAS_EACH) parts.push("gas " + ethers.formatEther(bal));
+          else {
+            const need = GAS_EACH - bal;
+            await confirm(await deployer.sendTransaction({ to: w.address, value: need }));
+            parts.push("补 gas " + ethers.formatEther(need));
+          }
+        } else parts.push("不给 gas");
+
+        if (role !== "beneficiary") {
+          const tb = await read("查币", () => token.balanceOf(w.address));
+          if (tb >= mintAmt) parts.push("币 " + ethers.formatUnits(tb, decimals));
+          else {
+            // mint 无权限，直接给目标地址造，不用先给自己再转
+            await confirm(await token.mint(w.address, mintAmt - tb));
+            parts.push("铸币 " + ethers.formatUnits(mintAmt - tb, decimals));
+          }
+        } else parts.push("不给币");
+
+        console.log(role.padEnd(12) + w.address + "  " + parts.join("，"));
+      } catch (e) {
+        if (!transient(e)) throw e;
+        pending++;
+        console.log(role.padEnd(12) + w.address + "  ✗ " + (e.code || e.shortMessage || "网络中断") + "，留到下一轮");
       }
-    } else {
-      parts.push("不给 gas");
     }
 
-    if (role !== "beneficiary") {
-      const tb = await token.balanceOf(w.address);
-      if (tb >= mintAmt) {
-        parts.push("币已有 " + ethers.formatUnits(tb, decimals));
-      } else {
-        // mint 无权限，直接给目标地址造，不用先给自己再转
-        await (await token.mint(w.address, mintAmt - tb)).wait();
-        parts.push("铸币 " + ethers.formatUnits(mintAmt - tb, decimals));
-      }
-    } else {
-      parts.push("不给币");
+    if (pending === 0) {
+      console.log("\n全部到位。出资方余额",
+        ethers.formatEther(await read("查余额", () => ethers.provider.getBalance(deployer.address))), "BNB");
+      return;
     }
-
-    console.log(line + parts.join("，"));
+    await sleep(3000);
   }
 
-  console.log("\n出资方余额",
-    ethers.formatEther(await ethers.provider.getBalance(deployer.address)), "BNB");
+  throw new Error(`跑了 ${PASSES} 轮仍有地址没补齐，八成是 RPC 一直不通；换个 BSC_TESTNET_RPC_URL 再跑`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
