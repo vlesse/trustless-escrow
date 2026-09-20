@@ -34,6 +34,47 @@ contract MockERC20 {
     }
 }
 
+/// @notice 小数位可配的标准 ERC20。
+/// @dev 同一个符号在不同链上精度不同：以太坊和 TRON 上的 USDT 是 6 位，
+///      BSC 上的 USDT/USDC 是 18 位。差 12 个数量级，而且链上不会因此报错 ——
+///      只会把「1000 个代币的最低质押」悄悄变成尘埃。测试网必须用与目标链
+///      相同的精度，否则这类错误要到上主网才暴露。
+contract MockTokenD {
+    string public name;
+    string public symbol;
+    uint8 public immutable decimals;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    constructor(string memory n, string memory s, uint8 d) {
+        name = n;
+        symbol = s;
+        decimals = d;
+    }
+
+    function mint(address to, uint256 amt) external {
+        balanceOf[to] += amt;
+    }
+
+    function approve(address s, uint256 a) external returns (bool) {
+        allowance[msg.sender][s] = a;
+        return true;
+    }
+
+    function transfer(address to, uint256 a) external returns (bool) {
+        balanceOf[msg.sender] -= a;
+        balanceOf[to] += a;
+        return true;
+    }
+
+    function transferFrom(address f, address t, uint256 a) external returns (bool) {
+        allowance[f][msg.sender] -= a;
+        balanceOf[f] -= a;
+        balanceOf[t] += a;
+        return true;
+    }
+}
+
 /// @notice USDT 风格的非标准 ERC20：transfer / transferFrom 不返回任何值。
 /// @dev 这是主网与 TRON 上真实 USDT 的行为。用 IERC20 接口直接调用会 revert。
 ///      本 mock 的存在就是为了确保 SafeTransfer 真的能处理它 ——

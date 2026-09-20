@@ -21,11 +21,17 @@
  * 选填：
  *   FEE_BPS           协议手续费，基点，上限 100（=1%），默认 50
  *   JURY_SIZE         陪审团席位数，必须为奇数，默认 5
- *   MIN_STAKE         陪审员最低质押（最小单位），默认 1000e6
- *   STAKE_PER_VOTE    每席位锁定/罚没额（最小单位），默认 100e6
- *   OPT_COST          乐观层仲裁服务费，默认 100e6
- *   JURY_COST         陪审团服务费，默认 60e6（必须 <= OPT_COST）
- *   CHALLENGE_BOND    挑战保证金，默认 50e6
+ *
+ *   以下金额类参数一律按**结算币的最小单位**填写。不填时取默认值，
+ *   而默认值会按 SETTLEMENT_TOKEN 实际的 decimals() 换算 ——
+ *   同一个 USDT 在以太坊/TRON 上是 6 位、在 BSC 上是 18 位，
+ *   把 6 位的数字搬到 18 位的链上，链上不会报错，只会把门槛悄悄变成零。
+ *
+ *   MIN_STAKE         陪审员最低质押，默认 1000 个代币
+ *   STAKE_PER_VOTE    每席位锁定/罚没额，默认 100 个代币
+ *   OPT_COST          乐观层仲裁服务费，默认 100 个代币
+ *   JURY_COST         陪审团服务费，默认 60 个（必须 <= OPT_COST）
+ *   CHALLENGE_BOND    挑战保证金，默认 50 个
  *   FINAL_ARBITRATOR  若已有终局仲裁方则填入，跳过部署 StakedJury
  *   SKIP_REPUTATION   设为 1 则不部署信誉层（信誉层可选，托管功能不依赖它）
  *
@@ -55,17 +61,56 @@ async function main() {
 
   const feeBps = Number(process.env.FEE_BPS ?? 50);
   const jurySize = num("JURY_SIZE", 5);
-  const minStake = num("MIN_STAKE", 1000_000000n);
-  const stakePerVote = num("STAKE_PER_VOTE", 100_000000n);
-  const optCost = num("OPT_COST", 100_000000n);
-  const juryCost = num("JURY_COST", 60_000000n);
-  const challengeBond = num("CHALLENGE_BOND", 50_000000n);
+
+  // 结算币的精度必须从链上读，不能假定。
+  // 顺带这一步也验证了 SETTLEMENT_TOKEN 真的是个代币合约 —— 只校验
+  // isAddress 的话，填错成一个普通地址时整个部署会「成功」，然后没人能入金。
+  const erc20 = new ethers.Contract(
+    settlementToken, ["function decimals() view returns (uint8)"], ethers.provider
+  );
+  let decimals;
+  try {
+    decimals = Number(await erc20.decimals());
+  } catch {
+    throw new Error(
+      `读不到 SETTLEMENT_TOKEN (${settlementToken}) 的 decimals()。` +
+      "确认这个地址是结算币合约，而且当前网络上确实部署了它。"
+    );
+  }
+  const ONE = 10n ** BigInt(decimals);
+
+  /**
+   * 金额参数。不填取默认值（按整数个代币 × 实际精度），填了按最小单位解释。
+   *
+   * 显式值加一道常识检查：小于 1 个代币、或大于十亿个，几乎一定是照着
+   * 别的链的精度抄来的。这个错误链上不会 revert —— 它只会把最低质押
+   * 变成尘埃，让任何人用一丁点钱就能当陪审员。
+   */
+  const amt = (name, wholeTokens) => {
+    const v = process.env[name];
+    if (v === undefined || v === "") return wholeTokens * ONE;
+    const raw = BigInt(v);
+    if (raw !== 0n && (raw < ONE || raw > 1_000_000_000n * ONE)) {
+      throw new Error(
+        `${name}=${raw} 在 ${decimals} 位精度下等于 ` +
+        `${ethers.formatUnits(raw, decimals)} 个代币，不像是有意的。` +
+        `若想要 N 个代币，请填 ${ONE} × N；确实要这个数就改本文件的这处校验。`
+      );
+    }
+    return raw;
+  };
+
+  const minStake = amt("MIN_STAKE", 1000n);
+  const stakePerVote = amt("STAKE_PER_VOTE", 100n);
+  const optCost = amt("OPT_COST", 100n);
+  const juryCost = amt("JURY_COST", 60n);
+  const challengeBond = amt("CHALLENGE_BOND", 50n);
 
   if (juryCost > optCost) throw new Error("JURY_COST 必须 <= OPT_COST，否则乐观层无力支付陪审团");
 
   console.log("部署者:", deployer.address);
   console.log("手续费受益地址(immutable):", feeBeneficiary);
-  console.log("结算币种:", settlementToken);
+  console.log("结算币种:", settlementToken, `(${decimals} 位小数)`);
   console.log("费率:", feeBps, "bps\n");
 
   // 1. 托管实现合约（immutable，逻辑永不可升级）
