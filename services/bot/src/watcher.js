@@ -4,7 +4,7 @@ import * as session from "./session.js";
 import { makeProvider, loadDeal, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
 import * as juryalert from "./juryalert.js";
 import { esc } from "./telegram.js";
-import { ranges, getLogs as getLogsChunked } from "./logs.js";
+import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
 
 /// 链上事件推送。
 ///
@@ -340,14 +340,42 @@ async function scanDraws(notify, fromBlock, toBlock) {
  * 启动监听。
  * @param {(chatId: string, text: string) => Promise<any>} notify 发消息的函数
  */
+/**
+ * 公共节点保留多久的日志。
+ *
+ * 实测 BSC 测试网约 5 万块，按 0.45 秒出块算不到 7 小时。超出这个范围的
+ * 请求不是「慢」，是**再也拿不到**。所以启动时游标落在更早的位置，必须
+ * 直接跳到能拿得到的地方并明说跳过了多少 —— 假装能补上，结果是每一轮都
+ * 在同一处失败，一条通知也发不出去。
+ *
+ * 由此得出一条必须写进说明的性质：**通知是尽力而为的，不是保证。**
+ * 停机超过这个窗口就会漏事件。资金状态的权威来源是 /deal，它直接读合约
+ * 当前状态，不依赖任何日志。
+ */
+const MAX_LOOKBACK = Number(process.env.MAX_LOOKBACK_BLOCKS ?? 45000);
+
 export async function start(notify) {
   const tracked = new Set();
-  let last = Number(process.env.WATCH_FROM_BLOCK ?? 0);
+
+  // 游标落盘。不落盘的话每次重启都回到 WATCH_FROM_BLOCK，
+  // 而那个位置迟早会被节点裁剪掉，于是重启一次就永久卡死。
+  let last = Math.max(session.watchCursor(), Number(process.env.WATCH_FROM_BLOCK ?? 0));
 
   const tick = async () => {
     try {
       const head = await provider.getBlockNumber();
       const safe = head - CONFIRMATIONS;
+
+      // 落后太多就跳到节点还留着的位置，并把跳过了多少说清楚
+      const floor = safe - MAX_LOOKBACK;
+      if (last < floor) {
+        console.warn(
+          `监听游标 ${last} 已超出节点保留范围，跳到 ${floor}；` +
+          `其间 ${floor - last} 个区块的事件拿不到了（约 ${((floor - last) * 0.45 / 3600).toFixed(1)} 小时）。` +
+          `受影响的用户可以用 /deal <合约地址> 直接读当前状态。`);
+        last = floor;
+        session.setWatchCursor(last);
+      }
       if (safe <= last) return;
 
       /*
@@ -362,10 +390,17 @@ export async function start(notify) {
        * 就按 txHash+logIndex 去重，重扫不会重复打扰用户。
        */
       for (const [lo, hi] of ranges(last + 1, safe)) {
-        await discoverDeals(notify, lo, hi, tracked);
-        await processEvents(notify, tracked, lo, hi);
-        await scanDraws(notify, lo, hi);
+        try {
+          await discoverDeals(notify, lo, hi, tracked);
+          await processEvents(notify, tracked, lo, hi);
+          await scanDraws(notify, lo, hi);
+        } catch (e) {
+          // 历史被裁剪和网络抖动要分开：前者重试一万次也是同样的错。
+          if (!isPruned(e)) throw e;
+          console.warn(`区块 ${lo}-${hi} 的日志已被节点裁剪，跳过。`);
+        }
         last = hi;
+        session.setWatchCursor(last);
       }
       await checkDeadlines(notify, tracked);
     } catch (e) {
@@ -375,5 +410,5 @@ export async function start(notify) {
 
   await tick();
   setInterval(tick, config.watchIntervalMs);
-  console.log(`事件监听已启动（确认数 ${CONFIRMATIONS}，跟踪 ${tracked.size} 笔交易）`);
+  console.log(`事件监听已启动（确认数 ${CONFIRMATIONS}，游标 ${last}，跟踪 ${tracked.size} 笔交易）`);
 }

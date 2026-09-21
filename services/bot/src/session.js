@@ -8,15 +8,16 @@ import { config } from "./config.js";
 /// 一旦落盘，这个状态文件就成了一个高价值攻击目标。
 /// 同理，日志里也只打 Telegram 用户 ID 和命令名，不打内容。
 
-let state = { users: {}, notified: {} };
+let state = { users: {}, notified: {}, watchCursor: 0 };
 
 export function load() {
   try {
     state = JSON.parse(fs.readFileSync(config.stateFile, "utf8"));
     state.users ??= {};
     state.notified ??= {};
+    state.watchCursor ??= 0;
   } catch {
-    state = { users: {}, notified: {} };
+    state = { users: {}, notified: {}, watchCursor: 0 };
   }
   return state;
 }
@@ -87,3 +88,18 @@ export function findUsersByAddress(address) {
 }
 
 export const allUsers = () => state.users;
+
+/**
+ * 事件监听扫到哪个区块了。
+ *
+ * 必须落盘。不落盘的话每次重启都从 WATCH_FROM_BLOCK 重扫，而公共节点
+ * 只保留最近约 5 万个区块的日志（BSC 上不到 7 小时）—— 重启一次就永远
+ * 卡在一个已经被裁剪掉的位置上，每轮都在同一处失败。
+ */
+export const watchCursor = () => state.watchCursor || 0;
+export function setWatchCursor(n) {
+  if (n > (state.watchCursor || 0)) {
+    state.watchCursor = n;
+    save();
+  }
+}

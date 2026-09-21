@@ -39,6 +39,19 @@ async function forEachChunk({ provider, filter, fromBlock, toBlock, maxRange }, 
   }
 }
 
+/**
+ * 这一段历史节点已经没有了吗？
+ *
+ * 公共节点只保留最近一段时间的日志（实测 BSC 测试网约 5 万块，不到 7 小时）。
+ * 再往前请求会报错，而且**再请求一百次也是同样的错** —— 这种错必须和
+ * 网络抖动区分开：抖动该重试，裁剪该跳过。分不清的后果是游标永远卡在
+ * 一个已经不存在的位置上，每轮都在同一处失败。
+ */
+export function isPruned(e) {
+  const m = (e?.error?.message || e?.message || "") + "";
+  return /pruned|history|not found|missing trie|limit exceeded/i.test(m);
+}
+
 /** 一次性取回全部日志。只在跨度可控时用（比如按时间窗算出来的回溯）。 */
 export async function getLogs({ provider, filter, fromBlock, toBlock, maxRange }) {
   const all = [];

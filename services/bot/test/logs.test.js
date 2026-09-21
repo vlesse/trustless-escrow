@@ -209,3 +209,36 @@ describe("绑定链接", () => {
       `签名页认的前缀是「${m[1]}」，机器人发的文本对不上，绑定会被页面拒绝`);
   });
 });
+
+// ---------------------------------------------------------------------------
+
+const { isPruned } = await import("../src/logs.js");
+
+/**
+ * 「历史没了」和「网络抖了一下」必须分得开。
+ *
+ * 分不开的后果是二选一，而两个都很糟：
+ *   把裁剪当抖动 → 无限重试同一个已经不存在的区间，游标永久卡死；
+ *   把抖动当裁剪 → 一次网络波动就永久跳过一段真实事件。
+ */
+describe("历史被裁剪的识别", () => {
+  test("认得出各家节点的裁剪措辞", () => {
+    const real = [
+      { error: { message: "History has been pruned for this block. To remove restrictions, order a dedicated full node here: https://www.allnodes.com/bnb/host" } },
+      { error: { message: "limit exceeded" } },
+      { message: "missing trie node" },
+      { message: "requested block number is not found" },
+    ];
+    for (const e of real) assert.equal(isPruned(e), true, JSON.stringify(e));
+  });
+
+  test("不把网络抖动当成裁剪 —— 那会永久跳过真实事件", () => {
+    const transient = [
+      { code: "UND_ERR_HEADERS_TIMEOUT", message: "Headers Timeout Error" },
+      { code: "ECONNRESET", message: "socket hang up" },
+      { message: "fetch failed" },
+      { message: "exceed maximum block range: 50000" },   // 这个是跨度超限，切片能解决
+    ];
+    for (const e of transient) assert.equal(isPruned(e), false, JSON.stringify(e));
+  });
+});
