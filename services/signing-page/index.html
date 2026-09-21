@@ -120,6 +120,24 @@
   .connected b { font-family: ui-monospace, Menlo, Consolas, monospace;
                  color: var(--text); word-break: break-all; }
 
+  /* 三步进度。走到哪一步要一眼看得见 —— 实测有人把地址当成了签名结果，
+     而在点按钮之前，那确实是页面上唯一一串 0x。 */
+  .steps { list-style: none; counter-reset: n; padding: 0; margin: 18px 0 0; }
+  .steps li { counter-increment: n; position: relative; padding: 10px 0 10px 40px;
+              border-top: 1px solid var(--line); opacity: .45; }
+  .steps li.now { opacity: 1; }
+  .steps li.done { opacity: .7; }
+  .steps li::before {
+    content: counter(n); position: absolute; left: 0; top: 10px;
+    width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line);
+    display: grid; place-items: center;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted);
+  }
+  .steps li.done::before { content: "✓"; border-color: var(--ok); color: var(--ok); }
+  .steps li.now::before { border-color: var(--text); color: var(--text); }
+  .steps h4 { font-size: 14px; margin: 0 0 2px; }
+  .steps p { font-size: 13px; color: var(--muted); margin: 0; }
+
   #status { font-size: 13.5px; text-align: center; margin-top: 12px; color: var(--bad); min-height: 20px; }
   #result { text-align: center; }
   #txhash { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px;
@@ -167,17 +185,32 @@
     <pre id="msg-text" style="white-space:pre-wrap;word-break:break-word;margin:0"></pre>
   </div>
 
+  <!-- 三步写在界面上。
+       实测有人把「已连接 0x…」那行地址当成了签名结果 —— 两者都是 0x 开头，
+       而在点按钮之前，那是页面上唯一一串 0x。光靠措辞分不开，得让用户
+       始终看得见自己走到第几步。 -->
+  <ol class="steps" id="msg-steps" style="margin-top:18px">
+    <li id="msg-step1"><h4>连接钱包</h4><p>页面只读取你的地址，读不到余额以外的任何东西。</p></li>
+    <li id="msg-step2"><h4>点「签名」，在钱包弹窗里确认</h4>
+        <p>弹窗里显示的文字应当和上面那段逐字一致。不一致就不要签。</p></li>
+    <li id="msg-step3"><h4>把签名复制回 Telegram</h4>
+        <p>签名是一串 132 个字符的 <code>0x…</code>，比地址长得多，点完按钮才会出现。</p></li>
+  </ol>
+
   <div style="margin-top:18px">
-    <div class="connected" id="msg-connected" hidden>已连接 <b id="msg-addr"></b></div>
+    <div class="connected" id="msg-connected" hidden>
+      当前钱包 <b id="msg-addr"></b>
+      <span class="sub" style="display:block;margin-top:4px">这是你的地址，不是签名。</span>
+    </div>
     <button id="msg-connect">连接钱包</button>
     <button id="msg-sign" hidden>签名</button>
     <p id="msg-status"></p>
 
-    <div id="msg-result" class="card" hidden style="margin-top:14px">
-      <h2>签好了</h2>
-      <p class="sub" style="margin:0 0 8px">把下面这串复制回 Telegram 发给机器人：</p>
+    <div id="msg-result" class="card" hidden style="margin-top:14px;border-color:#1f5134">
+      <h2>✅ 签好了 —— 下面这串才是签名</h2>
+      <p class="sub" style="margin:0 0 8px">复制它，回 Telegram 发给机器人：</p>
       <code id="msg-sig" style="word-break:break-all;display:block;line-height:1.6"></code>
-      <button id="msg-copy" class="ghost" style="margin-top:10px">复制签名</button>
+      <button id="msg-copy" style="margin-top:10px">复制签名</button>
     </div>
   </div>
 

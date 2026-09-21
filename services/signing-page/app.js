@@ -596,6 +596,17 @@ async function runMessageMode(msg) {
   $("msgmain").hidden = false;
   $("msg-text").textContent = msg.text;
 
+  /// 把进度显式画出来。用户分不清「地址」和「签名」时，
+  /// 看着步骤就知道自己还没走到出签名那一步。
+  const step = (n) => {
+    for (let i = 1; i <= 3; i++) {
+      const el = $("msg-step" + i);
+      el.classList.toggle("done", i < n);
+      el.classList.toggle("now", i === n);
+    }
+  };
+  step(1);
+
   let signer = null;
 
   $("msg-connect").addEventListener("click", async () => {
@@ -610,6 +621,7 @@ async function runMessageMode(msg) {
       $("msg-connect").hidden = true;
       $("msg-sign").hidden = false;
       $("msg-status").textContent = "";
+      step(2);
     } catch (e) {
       $("msg-status").textContent = e.shortMessage || e.message;
     }
@@ -624,6 +636,7 @@ async function runMessageMode(msg) {
       $("msg-result").hidden = false;
       $("msg-sign").hidden = true;
       $("msg-status").textContent = "";
+      step(3);
     } catch (e) {
       $("msg-status").textContent = e.shortMessage || e.message;
     }
