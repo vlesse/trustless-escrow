@@ -150,6 +150,43 @@
   </p>
 </div>
 
+<!-- 消息签名（绑定钱包）。和交易签名走完全不同的一套界面：
+     这两件事的风险模型不一样，混在一个界面里会让用户分不清自己在做哪个。 -->
+<main id="msgmain" hidden>
+  <h1>绑定钱包</h1>
+  <p class="sub">签名在你自己的钱包里完成，本页面不接触你的私钥。</p>
+
+  <div class="banner" style="background:#132a1c;border-color:#1f5134;color:#9ae6b4">
+    <b>这不是一笔交易</b>
+    不转移任何资产，不授予任何权限，不消耗 gas。它只是用你的私钥给一段文字盖个章，
+    证明这个地址在你手里。
+  </div>
+
+  <div class="card">
+    <h2>你将要签名的全部内容</h2>
+    <pre id="msg-text" style="white-space:pre-wrap;word-break:break-word;margin:0"></pre>
+  </div>
+
+  <div style="margin-top:18px">
+    <div class="connected" id="msg-connected" hidden>已连接 <b id="msg-addr"></b></div>
+    <button id="msg-connect">连接钱包</button>
+    <button id="msg-sign" hidden>签名</button>
+    <p id="msg-status"></p>
+
+    <div id="msg-result" class="card" hidden style="margin-top:14px">
+      <h2>签好了</h2>
+      <p class="sub" style="margin:0 0 8px">把下面这串复制回 Telegram 发给机器人：</p>
+      <code id="msg-sig" style="word-break:break-all;display:block;line-height:1.6"></code>
+      <button id="msg-copy" class="ghost" style="margin-top:10px">复制签名</button>
+    </div>
+  </div>
+
+  <p class="foot">
+    待签内容通过 URL 的 <code>#</code> 片段传递，浏览器不会把它发送给服务器。<br>
+    本页面只接受本协议的绑定文本，其它任何内容一律拒绝签名。
+  </p>
+</main>
+
 <main id="main" hidden>
   <h1>确认交易</h1>
   <p class="sub">请核对下面的内容。签名在你自己的钱包里完成，本页面不接触你的私钥。</p>

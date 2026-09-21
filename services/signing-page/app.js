@@ -544,7 +544,112 @@ async function sign() {
 
 // ---------------------------------------------------------------- 启动
 
+
+// ===================================================================== 消息签名
+//
+// 绑定钱包需要用户对一段文字做 personal_sign。MetaMask 插件**没有**给普通
+// 用户签任意消息的入口 —— 让用户自己去找「personal_sign」等于让这条流程作废。
+//
+// 但做一个「签任意东西」的页面是危险的：personal_sign 一段 32 字节的十六进制，
+// 签出来的东西可以当作另一条链上的交易签名用。一个能被任意 URL 驱动去签任意
+// 内容的页面，本身就是一件钓鱼工具。
+//
+// 所以这里只接受本协议的绑定文本：必须以固定前缀开头，且必须是人能读懂的文字。
+// 其它一律拒绝，包括看起来很像的。
+
+const BIND_PREFIX = "Trustless Escrow 钱包绑定";
+
+/// #msg=<base64url({text})>，没有就返回 null（说明是交易模式）
+function parseMessageFragment() {
+  const m = location.hash.match(/[#&]msg=([A-Za-z0-9_-]+)/);
+  if (!m) return null;
+
+  let json;
+  try {
+    const b64 = m[1].replace(/-/g, "+").replace(/_/g, "/");
+    json = JSON.parse(decodeURIComponent(escape(atob(b64))));
+  } catch {
+    throw new Error("链接内容已损坏，无法解析。请回到 Telegram 重新获取。");
+  }
+
+  const text = json.text;
+  if (typeof text !== "string" || text.length === 0) throw new Error("链接里没有待签名的内容。");
+  if (text.length > 2000) throw new Error("待签名内容过长，已拒绝。");
+
+  // 唯一的放行条件。不做「像不像」的判断 —— 判断得越聪明，被绕过的方式越多。
+  if (!text.startsWith(BIND_PREFIX)) {
+    throw new Error(
+      "本页面只用于签署本协议的钱包绑定文本，不是一个通用的签名工具。" +
+      "你打开的链接要求签署别的内容，已拒绝。" +
+      "如果这个链接不是机器人给你的，请不要再打开它。"
+    );
+  }
+  // 控制字符会让展示出来的内容和实际签的不一致 —— 用户看到的必须就是签的。
+  if (/[\u0000-\u0008\u000B-\u001F\u007F]/.test(text)) {
+    throw new Error("待签名内容里有不可见字符，已拒绝签名。");
+  }
+  return { text };
+}
+
+async function runMessageMode(msg) {
+  $("loading").hidden = true;
+  $("msgmain").hidden = false;
+  $("msg-text").textContent = msg.text;
+
+  let signer = null;
+
+  $("msg-connect").addEventListener("click", async () => {
+    try {
+      const eth = injectedProvider();
+      if (!eth) throw new Error("没有检测到钱包。请在 MetaMask 等钱包的内置浏览器里打开本页面。");
+      const provider = new ethers.BrowserProvider(eth);
+      await provider.send("eth_requestAccounts", []);
+      signer = await provider.getSigner();
+      $("msg-addr").textContent = await signer.getAddress();
+      $("msg-connected").hidden = false;
+      $("msg-connect").hidden = true;
+      $("msg-sign").hidden = false;
+      $("msg-status").textContent = "";
+    } catch (e) {
+      $("msg-status").textContent = e.shortMessage || e.message;
+    }
+  });
+
+  $("msg-sign").addEventListener("click", async () => {
+    try {
+      $("msg-status").textContent = "请在钱包里确认…";
+      // signMessage 走的就是 personal_sign，钱包会原样展示这段文字
+      const sig = await signer.signMessage(msg.text);
+      $("msg-sig").textContent = sig;
+      $("msg-result").hidden = false;
+      $("msg-sign").hidden = true;
+      $("msg-status").textContent = "";
+    } catch (e) {
+      $("msg-status").textContent = e.shortMessage || e.message;
+    }
+  });
+
+  $("msg-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("msg-sig").textContent);
+      $("msg-copy").textContent = "已复制";
+      setTimeout(() => { $("msg-copy").textContent = "复制签名"; }, 1500);
+    } catch {
+      // 剪贴板在非 HTTPS 或权限受限时会失败。签名本来就显示在页面上，手动选中即可。
+      $("msg-copy").textContent = "复制失败，请手动选中上面那串";
+    }
+  });
+}
+
 async function main() {
+  // 消息签名和交易签名是两条完全独立的路径，共用一个页面但不共用任何状态。
+  try {
+    const msg = parseMessageFragment();
+    if (msg) return runMessageMode(msg);
+  } catch (e) {
+    return showError(e.message);
+  }
+
   try {
     state.tx = parseFragment();
   } catch (e) {

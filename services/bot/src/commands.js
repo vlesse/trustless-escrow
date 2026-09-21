@@ -9,7 +9,7 @@ import {
   tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State,
 } from "./deals.js";
 import {
-  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toEip681, buildFundDeal,
+  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toMessageLink, toEip681, buildFundDeal,
 } from "./txlink.js";
 import {
   dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
@@ -126,6 +126,10 @@ export async function cmdBind(chatId, userId) {
   session.setFlow(userId, "bind", { nonce, issuedAt });
 
   const challenge = buildChallenge(userId, nonce, issuedAt);
+  // 原来只写「用 MetaMask 的 personal_sign」—— 而 MetaMask 插件根本没有
+  // 给普通用户签任意消息的入口，这一步对绝大多数人是走不通的。
+  // 配了签名页就直接给链接；没配才退回到让用户自己想办法。
+  const link = toMessageLink(challenge);
   await sendMessage(chatId, [
     "*绑定钱包*",
     "",
@@ -135,8 +139,16 @@ export async function cmdBind(chatId, userId) {
     "",
     esc("这不是一笔交易，不转移资产、不授予权限、不消耗 gas。"),
     "",
-    esc("签名方式：多数钱包在「设置 → 签名消息」里，或用 MetaMask 的 personal_sign。"),
-    esc("然后把得到的签名（0x 开头）直接发给我。"),
+    ...(link
+      ? [
+          `[👉 点这里用钱包签名](${link})`,
+          esc("手机上请用钱包 App 的内置浏览器打开；电脑上用装了 MetaMask 的浏览器。"),
+          esc("签完页面会给出一串 0x 开头的签名，复制回来发给我。"),
+        ]
+      : [
+          esc("签名方式：多数钱包在「设置 → 签名消息」里。"),
+          esc("然后把得到的签名（0x 开头）直接发给我。"),
+        ]),
     "",
     esc("10 分钟内有效。/cancel 退出。"),
   ].join("\n"));

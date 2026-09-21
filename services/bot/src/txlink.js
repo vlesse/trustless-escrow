@@ -83,6 +83,21 @@ export function toSigningLink(tx) {
   return `${config.signingPageUrl}#tx=${payload}`;
 }
 
+/**
+ * 消息签名页链接（绑定钱包用）。
+ *
+ * 原来只告诉用户「用 MetaMask 的 personal_sign」—— 而 MetaMask 插件**没有**
+ * 给普通用户签任意消息的入口。这等于让绑定这一步对绝大多数人直接作废。
+ *
+ * 用 JSON 而不是直接把文本塞进 URL：绑定文本里有换行和中文，
+ * 各家客户端对 URL 里这些字符的处理不一致，差一个字节签出来的就是另一个签名。
+ */
+export function toMessageLink(text) {
+  if (!config.signingPageUrl) return null;
+  const payload = Buffer.from(JSON.stringify({ text }), "utf8").toString("base64url");
+  return `${config.signingPageUrl}#msg=${payload}`;
+}
+
 /// EIP-681。对于带 calldata 的合约调用，规范支持有限，
 /// 这里用 functionName + 参数的形式，钱包支持度参差，所以只作为备选之一。
 export function toEip681(tx) {

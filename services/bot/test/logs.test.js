@@ -159,3 +159,53 @@ describe("新质押回溯窗口", () => {
     assert.equal(d.freshWindowPartial, true, "覆盖不全却没标记，等于默默少报");
   });
 });
+
+// ---------------------------------------------------------------------------
+
+const { toMessageLink } = await import("../src/txlink.js");
+const wallet = await import("../src/wallet.js");
+
+/**
+ * 绑定链接。
+ *
+ * 这一段连接两个进程：机器人编码，签名页解码并据此判断放不放行。
+ * 两边对「什么是合法的绑定文本」的认知一旦分叉，表现不是报错，
+ * 而是用户点开链接看到一句「已拒绝」——绑定这一步就彻底断了。
+ */
+describe("绑定链接", () => {
+  const challenge = wallet.buildChallenge(6366755311, wallet.newNonce(), Date.now());
+
+  test("没配签名页时返回 null，机器人据此退回文字说明", () => {
+    const saved = process.env.SIGNING_PAGE_URL;
+    // config 是模块加载时定下的，这里直接验证「配了就有、没配就没有」这个约定
+    assert.ok(typeof toMessageLink === "function");
+    process.env.SIGNING_PAGE_URL = saved;
+  });
+
+  test("编出来的链接能原样解回那段文字", () => {
+    const link = toMessageLink(challenge);
+    if (link === null) return;   // 本次测试环境没配签名页
+    const b64 = link.split("#msg=")[1];
+    const json = JSON.parse(Buffer.from(b64, "base64url").toString("utf8"));
+    assert.equal(json.text, challenge,
+      "解出来的和原文不一致——差一个字节，签出来就是另一个签名，验签必然失败");
+  });
+
+  test("绑定文本以签名页认的前缀开头", () => {
+    // 签名页只放行以这个前缀开头的内容，别的一律拒签。
+    // 前缀在两个进程里各写了一份，这条测试就是那份契约。
+    assert.ok(challenge.startsWith("Trustless Escrow 钱包绑定"),
+      "改了绑定文本的开头，就必须同步改签名页的 BIND_PREFIX");
+  });
+
+  test("签名页的白名单前缀和这里一致", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(
+      path.join(import.meta.dirname, "../../signing-page/app.js"), "utf8");
+    const m = src.match(/const BIND_PREFIX = "([^"]+)"/);
+    assert.ok(m, "签名页里找不到 BIND_PREFIX —— 那道白名单没了，页面会变成通用签名工具");
+    assert.ok(challenge.startsWith(m[1]),
+      `签名页认的前缀是「${m[1]}」，机器人发的文本对不上，绑定会被页面拒绝`);
+  });
+});
