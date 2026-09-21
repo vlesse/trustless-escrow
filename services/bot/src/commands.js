@@ -6,7 +6,7 @@ import * as rep from "./reputation.js";
 import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wallet.js";
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
-  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt,
+  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt, untilText, utcText,
 } from "./deals.js";
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toMessageLink, toEip681, buildFundDeal,
@@ -428,9 +428,9 @@ export function renderDealHeader({ deal, info, role, factoryArbitrator = null })
   ];
 
   if (deal.state === State.Funded) {
-    lines.push(`交付截止: ${esc(new Date(deal.deliveryDeadline * 1000).toISOString())}`);
+    lines.push(`交付截止: ${esc(untilText(deal.deliveryDeadline))}（${esc(utcText(deal.deliveryDeadline))}）`);
   } else if (deal.state === State.Delivered) {
-    lines.push(`验收截止: ${esc(new Date(deal.inspectionDeadline * 1000).toISOString())}`);
+    lines.push(`验收截止: ${esc(untilText(deal.inspectionDeadline))}（${esc(utcText(deal.inspectionDeadline))}）`);
   }
 
   /*

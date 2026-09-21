@@ -145,7 +145,7 @@ export function availableActions(deal, role, now = Math.floor(Date.now() / 1000)
       if (now < deal.inspectionDeadline) {
         if (role === "buyer") {
           add("confirm", "确认收货并放款");
-          add("dispute", "提起争议", `验收期至 ${new Date(deal.inspectionDeadline * 1000).toISOString()}`);
+          add("dispute", "提起争议", `验收期${untilText(deal.inspectionDeadline, now)}。提起争议会停表`);
         }
       } else {
         add("settle", "结算给卖家", "验收期已过且无异议，任何人可推动");
@@ -174,3 +174,27 @@ export const explorerTx = (h) => `${config.explorerUrl}/tx/${h}`;
 /// 条款哈希。链上只存哈希，原文由双方各自保管。
 /// 争议时提交原文，哈希对得上才被仲裁层认定为真本。
 export const hashTerms = (text) => ethers.keccak256(ethers.toUtf8Bytes(text));
+
+/**
+ * 截止时间一律显示成「还剩多久」，而不是绝对时刻。
+ *
+ * 机器人不知道每个用户在哪个时区，于是原来一律输出 UTC 的 ISO 时间串。
+ * 一个中国用户看到 `2026-09-21T06:30:26.000Z`，要在脑子里加八小时才知道
+ * 是下午两点半 —— 而他真正关心的问题从来都是「我还有多久」。
+ *
+ * 相对时间没有时区问题，也不需要换算。绝对时刻放在括号里备查。
+ */
+export function untilText(deadlineSec, now = Math.floor(Date.now() / 1000)) {
+  const left = Number(deadlineSec) - now;
+  if (left <= 0) return "已截止";
+  const d = Math.floor(left / 86400);
+  const h = Math.floor((left % 86400) / 3600);
+  const m = Math.floor((left % 3600) / 60);
+  if (d > 0) return `还剩 ${d} 天 ${h} 小时`;
+  if (h > 0) return `还剩 ${h} 小时 ${m} 分`;
+  return `还剩 ${m} 分钟`;
+}
+
+/// UTC 时刻，放在相对时间后面备查。写明 UTC，免得被当成本地时间。
+export const utcText = (sec) =>
+  new Date(Number(sec) * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";

@@ -1,9 +1,9 @@
 import { ethers } from "ethers";
 import { config } from "./config.js";
 import * as session from "./session.js";
-import { makeProvider, loadDeal, listDeals, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
+import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, fmtAmount, STATE_NAME, State, untilText, utcText } from "./deals.js";
 import * as juryalert from "./juryalert.js";
-import { esc } from "./telegram.js";
+import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
 
 /// 链上事件推送。
@@ -64,7 +64,8 @@ const short = (a) => `${a.slice(0, 8)}…${a.slice(-6)}`;
 /// 拒收整条消息 —— 不是显示错乱，是**根本发不出去**，用户什么都收不到。
 /// 地址放在 `` ` `` 代码块里，代码块内只需转义反引号与反斜杠，十六进制地址天然安全。
 const amt = (raw, info) => esc(fmtAmount(raw, info));
-const ts = (sec) => esc(new Date(Number(sec) * 1000).toISOString());
+/// 截止时间显示成「还剩多久」：用户关心的是这个，而且不受时区影响。
+const ts = (sec) => esc(`${untilText(sec)}（${utcText(sec)}）`);
 
 /// 把一条事件翻译成「发给谁、说什么」。
 /// 返回 [{to: "buyer"|"seller"|"both", text}]，由调用方解析成实际的 Telegram 用户。
@@ -202,19 +203,37 @@ async function discoverDeals(notify, fromBlock, toBlock, tracked) {
 
     for (const a of parties) {
       for (const chatId of session.findUsersByAddress(a)) {
-        await notify(chatId, text).catch((e) => console.error("开单通知失败:", e.message));
+        await notify(chatId, text, keyboard([[btn("查看这笔交易", `deal:${deal}`)]]))
+          .catch((e) => console.error("开单通知失败:", e.message));
       }
     }
   }
 }
 
+/**
+ * 推送时把「现在能做什么」一并给出去。
+ *
+ * 原来只发文字：「请及时确认收货」——然后用户得自己记住合约地址，
+ * 再打一遍 /deal 才找得到按钮。实测这是同一类问题的第三次：
+ * 消息说了该做什么，却不给做的地方。
+ *
+ * 验收期这种带倒计时的通知尤其不能这样：错过截止时间的代价是钱，
+ * 而多一步「回想合约地址」就够让人拖到明天。
+ */
 async function pushTo(notify, deal, target, text) {
   const addrs = target === "both" ? [deal.buyer, deal.seller]
     : target === "buyer" ? [deal.buyer] : [deal.seller];
 
   for (const a of addrs) {
+    // 按钮按收件人的角色算 —— 同一条通知对买卖双方能做的事不一样
+    const role = a.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
+    const rows = availableActions(deal, role)
+      .map((act) => [btn(act.label, `act:${act.id}:${deal.address}`)]);
+    rows.push([btn("查看这笔交易", `deal:${deal.address}`)]);
+
     for (const chatId of session.findUsersByAddress(a)) {
-      await notify(chatId, text).catch((e) => console.error("推送失败:", e.message));
+      await notify(chatId, text, keyboard(rows))
+        .catch((e) => console.error("推送失败:", e.message));
     }
   }
 }

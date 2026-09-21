@@ -136,7 +136,7 @@ async function main() {
   ]);
 
   // 事件推送与消息处理互不阻塞：监听出问题不应当让机器人整个失灵
-  startWatcher((chatId, text) => sendMessage(chatId, text)).catch((e) =>
+  startWatcher((chatId, text, extra = {}) => sendMessage(chatId, text, extra)).catch((e) =>
     log(`事件监听启动失败（机器人其余功能不受影响）: ${e.message}`)
   );
 

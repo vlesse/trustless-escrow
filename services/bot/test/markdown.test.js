@@ -310,3 +310,49 @@ describe("待签交易消息", () => {
     }
   });
 });
+
+const deals = await import("../src/deals.js");
+
+/**
+ * 截止时间的显示。
+ *
+ * 原来一律输出 UTC 的 ISO 串。一个中国用户看到 2026-09-21T06:30:26.000Z，
+ * 要在脑子里加八小时才知道是下午两点半 —— 而他真正关心的问题从来都是
+ * 「我还有多久」。错过验收期的代价是钱，不该让人先做一道算术题。
+ */
+describe("截止时间显示", () => {
+  const NOW = 1_800_000_000;
+  const at = (sec) => deals.untilText(NOW + sec, NOW);
+
+  test("按剩余时长说话，不是按时刻", () => {
+    assert.equal(at(30 * 60), "还剩 30 分钟");
+    assert.equal(at(3 * 3600 + 25 * 60), "还剩 3 小时 25 分");
+    assert.equal(at(2 * 86400 + 5 * 3600), "还剩 2 天 5 小时");
+  });
+
+  test("过了就说过了，不显示负数", () => {
+    assert.equal(at(-1), "已截止");
+    assert.equal(at(0), "已截止");
+    assert.equal(at(-86400), "已截止");
+  });
+
+  test("绝对时刻写明 UTC —— 不写会被当成本地时间，差八小时", () => {
+    assert.match(deals.utcText(NOW), /UTC$/);
+    assert.doesNotMatch(deals.utcText(NOW), /Z$/, "ISO 的 Z 普通用户不认得");
+  });
+
+  test("交易详情里不再出现裸 ISO 时间串", () => {
+    const md = cmds.renderDealHeader({
+      deal: {
+        address: A, buyer: A, seller: A, token: A, arbitrator: A,
+        price: U("100"), buyerBond: U("100"), sellerBond: U("100"),
+        buyerFunded: true, sellerFunded: true, state: 3, feeBps: 100,
+        deliveryDeadline: Math.floor(Date.now() / 1000) + 3600,
+        inspectionDeadline: Math.floor(Date.now() / 1000) + 7200,
+      },
+      info: INFO, role: "buyer",
+    }).join("\n");
+    assert.doesNotMatch(md, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/, "又冒出裸 ISO 串了");
+    assert.match(md, /还剩/);
+  });
+});

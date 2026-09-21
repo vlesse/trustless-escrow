@@ -295,8 +295,12 @@ contract Escrow is IEscrowArbitrable {
 
     /// @notice 交付期届满卖家仍未标记交付，买家取回全款与自己的保证金。
     /// @dev 无过错取消：卖家保证金原额退回，平台不收费。
-    ///      「未标记交付」是一个无歧义的客观事实，不需要仲裁介入；
-    ///      若买家认为还存在额外损失，应改走 raiseDispute。
+    ///      「未标记交付」是一个无歧义的客观事实，不需要仲裁介入。
+    ///
+    ///      注意买家**没有**别的选择：raiseDispute 要求状态为 Delivered，
+    ///      而这里状态是 Funded，买家调它会 revert。也就是说本协议不处理
+    ///      「因未交付而产生的额外损失」，只负责把钱原样退回。
+    ///      （此处原先的注释写着「应改走 raiseDispute」—— 那条路不存在。）
     function claimNonDelivery() external nonReentrant {
         if (state != State.Funded) revert BadState();
         if (msg.sender != buyer) revert NotParty();
