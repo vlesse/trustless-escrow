@@ -29,10 +29,24 @@ async function main() {
   const before = await read("查余额", () => t.balanceOf(to));
   const rc = await confirm(ethers.provider, await t.mint(to, amt));
 
+  /*
+   * 铸完立刻查余额，必须**指定区块号**。
+   *
+   * 公共 RPC 后面是一组节点。回执已经能查到，不代表下一个请求落到的那台
+   * 也同步到了那个高度 —— 实测就读回了铸币之前的旧值。
+   * 一个以为没成功的人会再铸一次，于是多出一百万个代币，而链上一切正常。
+   */
+  const after = await read("查余额", () => t.balanceOf(to, { blockTag: rc.blockNumber }));
+  if (after - before !== amt) {
+    throw new Error(
+      `对不上：铸了 ${ethers.formatUnits(amt, dec)}，但区块 ${rc.blockNumber} 上余额只增加了 ` +
+      `${ethers.formatUnits(after - before, dec)}。别重试，先查 tx ${rc.hash}`);
+  }
+
   console.log("结算币 " + tokenAddr + `（${dec} 位）`);
   console.log("收款   " + to);
   console.log("  之前 " + ethers.formatUnits(before, dec));
-  console.log("  之后 " + ethers.formatUnits(await read("查余额", () => t.balanceOf(to)), dec));
+  console.log("  之后 " + ethers.formatUnits(after, dec) + "（按区块 " + rc.blockNumber + " 读）");
   console.log("  tx   " + rc.hash);
 }
 

@@ -35,9 +35,13 @@ module.exports = {
   paths: { sources: "./contracts", tests: "./test", cache: "./cache", artifacts: "./artifacts" },
   networks: {
     bscTestnet: {
-      url: process.env.BSC_TESTNET_RPC_URL || "https://bsc-testnet-rpc.publicnode.com",
+      // publicnode 读很稳，但发交易时反复吃 UND_ERR_HEADERS_TIMEOUT；
+      // 官方 dataseed 在同一台机器上没这个问题。真断了用 BSC_TESTNET_RPC_URL 换。
+      url: process.env.BSC_TESTNET_RPC_URL || "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
       chainId: 97,
       accounts: accounts("DEPLOYER_PRIVATE_KEY"),
+      // 宁可快点失败再重试，也不要挂在那里等一个不会来的响应
+      timeout: 60_000,
     },
     bsc: {
       url: process.env.BSC_RPC_URL || "https://bsc-dataseed.bnbchain.org",
