@@ -369,10 +369,16 @@ export async function start(notify) {
       // 落后太多就跳到节点还留着的位置，并把跳过了多少说清楚
       const floor = safe - MAX_LOOKBACK;
       if (last < floor) {
-        console.warn(
-          `监听游标 ${last} 已超出节点保留范围，跳到 ${floor}；` +
-          `其间 ${floor - last} 个区块的事件拿不到了（约 ${((floor - last) * 0.45 / 3600).toFixed(1)} 小时）。` +
-          `受影响的用户可以用 /deal <合约地址> 直接读当前状态。`);
+        // 首次启动（游标为 0）和「停机太久导致漏事件」是两件事。
+        // 前者本来就没有历史要补，说成「丢了一万六千小时」只会让运维虚惊一场。
+        if (last === 0) {
+          console.log(`首次启动，从节点还留着的最早位置 ${floor} 开始扫描。`);
+        } else {
+          console.warn(
+            `监听游标 ${last} 已超出节点保留范围，跳到 ${floor}；` +
+            `其间 ${floor - last} 个区块的事件拿不到了（约 ${((floor - last) * 0.45 / 3600).toFixed(1)} 小时）。` +
+            `受影响的用户可以用 /deal <合约地址> 直接读当前状态。`);
+        }
         last = floor;
         session.setWatchCursor(last);
       }
