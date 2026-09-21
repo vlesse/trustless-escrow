@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import { config } from "./config.js";
 import * as session from "./session.js";
-import { makeProvider, loadDeal, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
+import { makeProvider, loadDeal, listDeals, tokenInfo, fmtAmount, STATE_NAME, State } from "./deals.js";
 import * as juryalert from "./juryalert.js";
 import { esc } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
@@ -354,8 +354,45 @@ async function scanDraws(notify, fromBlock, toBlock) {
  */
 const MAX_LOOKBACK = Number(process.env.MAX_LOOKBACK_BLOCKS ?? 45000);
 
+/**
+ * 从链上重建要跟踪的交易集合。
+ *
+ * 原来 tracked 只靠扫 DealCreated 日志来填。日志会被节点裁剪，游标也会
+ * 往前走 —— 一旦越过某笔单的开单区块，机器人就**永远再也发现不了它**，
+ * 于是那笔单后续的入金、发货、裁决全都不推送。实测重启之后
+ * 「跟踪 0 笔交易」，用户签完入金在 Telegram 上一点反应都没有。
+ *
+ * 工厂的 dealsOf 是链上状态，不是日志：它不会被裁剪，也不受游标影响。
+ * 拿它当权威来源，日志只用来发现「刚刚新开的那些」。
+ *
+ * 终态的单子不再跟踪 —— 它们不会再有事件，留着只会让 getLogs 的地址
+ * 列表无限膨胀。
+ */
+async function seedTracked(tracked) {
+  const seen = new Set();
+  for (const addr of session.boundAddresses()) {
+    if (seen.has(addr.toLowerCase())) continue;
+    seen.add(addr.toLowerCase());
+    try {
+      for (const a of await listDeals(addr, provider, 50)) {
+        const deal = await loadDeal(a, provider).catch(() => null);
+        if (!deal) continue;
+        if (deal.state === State.Resolved || deal.state === State.Cancelled) continue;
+        tracked.add(ethers.getAddress(a));
+      }
+    } catch (e) {
+      console.error("重建跟踪集失败:", addr, e.message);
+    }
+  }
+}
+
+/// 每隔多少轮重建一次。新绑定的用户、以及游标已经越过的旧单，
+/// 都靠这次重建被捡回来。
+const RESEED_EVERY = 10;
+
 export async function start(notify) {
   const tracked = new Set();
+  let ticks = 0;
 
   // 游标落盘。不落盘的话每次重启都回到 WATCH_FROM_BLOCK，
   // 而那个位置迟早会被节点裁剪掉，于是重启一次就永久卡死。
@@ -363,6 +400,7 @@ export async function start(notify) {
 
   const tick = async () => {
     try {
+      if (ticks++ % RESEED_EVERY === 0) await seedTracked(tracked);
       const head = await provider.getBlockNumber();
       const safe = head - CONFIRMATIONS;
 

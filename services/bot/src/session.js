@@ -103,3 +103,9 @@ export function setWatchCursor(n) {
     save();
   }
 }
+
+/// 所有已绑定的地址。事件监听用它从链上重建要跟踪的交易，
+/// 而不是依赖会被裁剪的日志。
+export function boundAddresses() {
+  return Object.values(state.users).map((u) => u.address).filter(Boolean);
+}
