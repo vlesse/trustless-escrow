@@ -6,7 +6,7 @@ import * as rep from "./reputation.js";
 import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wallet.js";
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
-  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State,
+  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt,
 } from "./deals.js";
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toMessageLink, toEip681, buildFundDeal,
@@ -387,7 +387,7 @@ export async function cmdDeals(chatId, userId) {
  * 写一条「复现当初那一行」的测试是不够的：那测的是复制品，真货改坏了
  * 照样绿。能被测到，本身就是这个函数存在的理由。
  */
-export function renderDealHeader({ deal, info, role }) {
+export function renderDealHeader({ deal, info, role, factoryArbitrator = null }) {
   const lines = [
     `*交易* \`${esc(deal.address)}\``,
     "",
@@ -406,8 +406,34 @@ export function renderDealHeader({ deal, info, role }) {
     lines.push(`验收截止: ${esc(new Date(deal.inspectionDeadline * 1000).toISOString())}`);
   }
 
+  /*
+   * 仲裁层地址。
+   *
+   * 原来这里写的是「入金前请自行核对这个仲裁层地址是不是你认可的那个」。
+   * 实测第一个真实用户的反应是：「我从哪里去核对？这是个什么玩意？」
+   *
+   * 他是对的。让人核对却不给参照物，等于没说；而这种话说多了，
+   * 用户学会的是「看不懂就跳过」—— 恰好是钓鱼最需要的那个习惯。
+   *
+   * 所以这里直接把比对做完：和工厂当前的默认仲裁层比。不一致不代表
+   * 一定有鬼（管理员换过、这笔单是换之前开的，也会不一致），但值得停下来问。
+   * 同时给出区块浏览器和公示站两个链接 —— 结论是我给的，
+   * 而验证结论的手段不能只在我手里。
+   */
   lines.push("", `仲裁层: \`${esc(deal.arbitrator)}\``);
-  lines.push(esc("入金前请自行核对这个仲裁层地址是不是你认可的那个。"));
+  lines.push(esc("争议发生时，由它来裁决这笔钱归谁。"));
+
+  if (factoryArbitrator) {
+    const same = factoryArbitrator.toLowerCase() === deal.arbitrator.toLowerCase();
+    lines.push(same
+      ? esc("✅ 与本协议工厂当前的默认仲裁层一致。")
+      : esc("⚠️ 与工厂当前的默认仲裁层不一致。这不必然有问题（可能这笔单开在更换之前），") +
+        "\n" + esc("但入金前值得先问清楚。"));
+  }
+
+  const links = [`[在区块浏览器查看](${explorerAddr(deal.arbitrator)})`];
+  if (config.siteUrl) links.push(`[对照官网公示](${config.siteUrl}#contracts)`);
+  lines.push(links.join(esc(" · ")));
   return lines;
 }
 
@@ -430,7 +456,10 @@ export async function cmdDeal(chatId, userId, addr) {
   const role = u.address ? roleOf(deal, u.address) : null;
   const acts = availableActions(deal, role);
 
-  const lines = renderDealHeader({ deal, info, role });
+  // 工厂当前的默认仲裁层，用来替用户做那次比对。读不到就退回只给链接 ——
+  // 少一条结论总比给一条错结论好。
+  const factoryArbitrator = await factoryAt(provider).defaultArbitrator().catch(() => null);
+  const lines = renderDealHeader({ deal, info, role, factoryArbitrator });
 
   // 对手方信誉。只在「还有得选」的时候才真正有用 ——
   // 钱一旦锁进去，再好看的评估也改变不了什么，所以入金前这段放在最显眼处。

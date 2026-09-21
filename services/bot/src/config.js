@@ -35,6 +35,10 @@ export const config = {
   /// 用户在自己的钱包里完成签名 —— 机器人全程不接触私钥。
   signingPageUrl: process.env.SIGNING_PAGE_URL ?? "",
 
+  /// 公示站地址。机器人会让用户拿链上读到的仲裁层地址和这里公示的那份比对。
+  /// 不配则只给区块浏览器链接 —— 那仍然能看，只是少了一个独立的参照物。
+  siteUrl: (process.env.PUBLIC_SITE_URL ?? "").replace(/\/$/, ""),
+
   /// 区块浏览器，用于生成可点击的地址/交易链接
   explorerUrl: (process.env.EXPLORER_URL ?? "https://testnet.bscscan.com").replace(/\/$/, ""),
 

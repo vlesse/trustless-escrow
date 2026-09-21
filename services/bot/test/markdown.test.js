@@ -203,3 +203,56 @@ describe("/deal 详情头", () => {
     assert.match(md, /1\\?\.00%/);
   });
 });
+
+/**
+ * 仲裁层那一段。
+ *
+ * 原来写的是「请自行核对」，而用户没有任何参照物。真实反应是
+ * 「我从哪里去核对？这是个什么玩意？」——让人核对却不给参照物等于没说，
+ * 而这种话说多了，用户学会的是「看不懂就跳过」，恰好是钓鱼最需要的习惯。
+ */
+describe("仲裁层提示", () => {
+  const BASE = {
+    address: A, buyer: A, seller: A, token: A,
+    arbitrator: "0x001871B4163D5e9f2CB728717f7bB60135650236",
+    price: U("100.5"), buyerBond: U("100.5"), sellerBond: U("100.5"),
+    buyerFunded: false, sellerFunded: false, state: 1, feeBps: 100,
+    deliveryDeadline: 1800000000, inspectionDeadline: 1800003600,
+  };
+  const render = (factoryArbitrator) =>
+    cmds.renderDealHeader({ deal: BASE, info: INFO, role: "buyer", factoryArbitrator }).join("\n");
+
+  test("说清楚它是干什么的，而不是只丢一个地址", () => {
+    assert.match(render(null), /裁决/, "得说明它在争议时决定钱归谁");
+    assert.doesNotMatch(render(null), /自行核对/, "别再让用户去核对一个他没有参照物的东西");
+  });
+
+  test("和工厂默认一致时直接给结论", () => {
+    assert.match(render(BASE.arbitrator), /一致/);
+    assert.doesNotMatch(render(BASE.arbitrator), /不一致/);
+  });
+
+  test("不一致时提示，但不武断说成有鬼", () => {
+    const md = render("0x0000000000000000000000000000000000000009");
+    assert.match(md, /不一致/);
+    assert.match(md, /不必然有问题/, "换过仲裁层也会不一致，不该吓唬用户");
+  });
+
+  test("结论之外还要给能自己验的手段", () => {
+    const md = render(BASE.arbitrator);
+    assert.match(md, /区块浏览器/, "结论是机器人给的，验证手段不能只在机器人手里");
+  });
+
+  test("读不到工厂默认时不给结论，只给链接", () => {
+    const md = render(null);
+    assert.doesNotMatch(md, /一致/, "读不到就别猜——少一条结论好过给一条错结论");
+    assert.match(md, /区块浏览器/);
+  });
+
+  test("这一段本身没有漏转义", () => {
+    for (const fa of [null, BASE.arbitrator, "0x0000000000000000000000000000000000000009"]) {
+      const bad = unescapedReserved(render(fa));
+      assert.deepEqual(bad, [], bad.map((b) => `「${b.ch}」在 …${b.near}…`).join("；"));
+    }
+  });
+});
