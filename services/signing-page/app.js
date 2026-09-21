@@ -557,7 +557,7 @@ async function sign() {
 // 所以这里只接受本协议的绑定文本：必须以固定前缀开头，且必须是人能读懂的文字。
 // 其它一律拒绝，包括看起来很像的。
 
-const BIND_PREFIX = "Trustless Escrow 钱包绑定";
+const BIND_PREFIX = "人人担保 钱包绑定";
 
 /// #msg=<base64url({text})>，没有就返回 null（说明是交易模式）
 function parseMessageFragment() {

@@ -54,7 +54,7 @@ export async function sendTxs(chatId, txs) {
 
 export async function cmdStart(chatId) {
   await sendMessage(chatId, [
-    "*Trustless Escrow*",
+    "*人人担保*",
     "",
     esc("非托管的点对点担保交易。资金锁在每笔交易独立的智能合约里。"),
     "",

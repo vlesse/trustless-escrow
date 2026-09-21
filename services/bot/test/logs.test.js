@@ -194,7 +194,7 @@ describe("绑定链接", () => {
   test("绑定文本以签名页认的前缀开头", () => {
     // 签名页只放行以这个前缀开头的内容，别的一律拒签。
     // 前缀在两个进程里各写了一份，这条测试就是那份契约。
-    assert.ok(challenge.startsWith("Trustless Escrow 钱包绑定"),
+    assert.ok(challenge.startsWith("人人担保 钱包绑定"),
       "改了绑定文本的开头，就必须同步改签名页的 BIND_PREFIX");
   });
 

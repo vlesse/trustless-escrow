@@ -1,4 +1,6 @@
-# Trustless Escrow
+# 人人担保（Renren Escrow）
+
+仓库名 `trustless-escrow` 是技术名，对外一律用「人人担保」。
 
 非托管的点对点担保交易协议。资金锁在每笔交易独立的智能合约里，运营者在任何时刻都无法挪用。
 

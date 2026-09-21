@@ -113,7 +113,7 @@ async function onCallback(q) {
 }
 
 async function main() {
-  console.log("Trustless Escrow · Telegram 前端");
+  console.log("人人担保 · Telegram 前端");
   console.log(describeConfig());
   console.log();
 

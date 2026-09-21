@@ -18,13 +18,15 @@ const CHALLENGE_TTL_MS = 10 * 60 * 1000; // 10 分钟
 /// 用户越习惯于看不懂就签，越容易在真正危险的弹窗上点确认。
 export function buildChallenge(telegramUserId, nonce, issuedAt = Date.now()) {
   return [
-    "Trustless Escrow 钱包绑定",
+    "人人担保 钱包绑定",
     "",
     `Telegram 用户: ${telegramUserId}`,
     `随机串: ${nonce}`,
     `时间: ${new Date(issuedAt).toISOString()}`,
     "",
-    "签名此消息以证明你控制该地址。",
+    // 不写「该地址」—— 这段文字里根本没有地址，读的人会去找一个不存在的东西。
+    // 地址是从签名里恢复出来的，所以这里说的是「签名所用的那个地址」。
+    "签名即证明：你持有签名所用地址的私钥。",
     "这不是一笔交易，不会转移任何资产，也不授予任何权限。",
   ].join("\n");
 }
