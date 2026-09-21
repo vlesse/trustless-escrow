@@ -7,7 +7,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/bot.test.js test/reputation.test.js test/arbitration.test.js test/quota.test.js test/juryalert.test.js test/logs.test.js test/routing.test.js",
+    "test": "node --test test/bot.test.js test/reputation.test.js test/arbitration.test.js test/quota.test.js test/juryalert.test.js test/logs.test.js test/routing.test.js test/markdown.test.js",
     "test:integration": "node test/integration.mjs",
     "test:watcher": "node test/watcher-integration.mjs",
     "test:reputation": "node test/reputation-integration.mjs"

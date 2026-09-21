@@ -377,6 +377,40 @@ export async function cmdDeals(chatId, userId) {
   await sendMessage(chatId, lines.join("\n"), keyboard(rows));
 }
 
+/**
+ * 交易详情的固定部分。
+ *
+ * 抽成纯函数是为了能被转义检查真正盖到。原来它写在 cmdDeal 里面 ——
+ * 那是个要连链的 async 函数，测不了，于是「手续费: 1.00%」漏转义一路活到
+ * 线上，Telegram 整条拒收，用户只看到「出错了」。
+ *
+ * 写一条「复现当初那一行」的测试是不够的：那测的是复制品，真货改坏了
+ * 照样绿。能被测到，本身就是这个函数存在的理由。
+ */
+export function renderDealHeader({ deal, info, role }) {
+  const lines = [
+    `*交易* \`${esc(deal.address)}\``,
+    "",
+    `状态: *${esc(STATE_NAME[deal.state])}*`,
+    `货款: ${esc(fmtAmount(deal.price, info))}`,
+    `买家保证金: ${esc(fmtAmount(deal.buyerBond, info))}${deal.buyerFunded ? " ✅已入金" : " ⏳未入金"}`,
+    `卖家保证金: ${esc(fmtAmount(deal.sellerBond, info))}${deal.sellerFunded ? " ✅已入金" : " ⏳未入金"}`,
+    // 不能省 esc：这里会输出 1.00%，而 MarkdownV2 里小数点必须转义。
+    `手续费: ${esc((deal.feeBps / 100).toFixed(2))}%`,
+    `你的角色: ${role ? (role === "buyer" ? "买家" : "卖家") : "无关第三方"}`,
+  ];
+
+  if (deal.state === State.Funded) {
+    lines.push(`交付截止: ${esc(new Date(deal.deliveryDeadline * 1000).toISOString())}`);
+  } else if (deal.state === State.Delivered) {
+    lines.push(`验收截止: ${esc(new Date(deal.inspectionDeadline * 1000).toISOString())}`);
+  }
+
+  lines.push("", `仲裁层: \`${esc(deal.arbitrator)}\``);
+  lines.push(esc("入金前请自行核对这个仲裁层地址是不是你认可的那个。"));
+  return lines;
+}
+
 export async function cmdDeal(chatId, userId, addr) {
   const u = session.user(userId);
   if (!ethers.isAddress(addr)) {
@@ -396,25 +430,7 @@ export async function cmdDeal(chatId, userId, addr) {
   const role = u.address ? roleOf(deal, u.address) : null;
   const acts = availableActions(deal, role);
 
-  const lines = [
-    `*交易* \`${esc(deal.address)}\``,
-    "",
-    `状态: *${esc(STATE_NAME[deal.state])}*`,
-    `货款: ${esc(fmtAmount(deal.price, info))}`,
-    `买家保证金: ${esc(fmtAmount(deal.buyerBond, info))}${deal.buyerFunded ? " ✅已入金" : " ⏳未入金"}`,
-    `卖家保证金: ${esc(fmtAmount(deal.sellerBond, info))}${deal.sellerFunded ? " ✅已入金" : " ⏳未入金"}`,
-    `手续费: ${(deal.feeBps / 100).toFixed(2)}%`,
-    `你的角色: ${role ? (role === "buyer" ? "买家" : "卖家") : "无关第三方"}`,
-  ];
-
-  if (deal.state === State.Funded) {
-    lines.push(`交付截止: ${esc(new Date(deal.deliveryDeadline * 1000).toISOString())}`);
-  } else if (deal.state === State.Delivered) {
-    lines.push(`验收截止: ${esc(new Date(deal.inspectionDeadline * 1000).toISOString())}`);
-  }
-
-  lines.push("", `仲裁层: \`${esc(deal.arbitrator)}\``);
-  lines.push(esc("入金前请自行核对这个仲裁层地址是不是你认可的那个。"));
+  const lines = renderDealHeader({ deal, info, role });
 
   // 对手方信誉。只在「还有得选」的时候才真正有用 ——
   // 钱一旦锁进去，再好看的评估也改变不了什么，所以入金前这段放在最显眼处。
