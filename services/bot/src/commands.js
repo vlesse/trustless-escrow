@@ -120,7 +120,25 @@ export async function cmdWhoami(chatId, userId) {
 
 // ------------------------------------------------------------------ 钱包绑定
 
-export async function cmdBind(chatId, userId) {
+export async function cmdBind(chatId, userId, arg = "") {
+  /*
+   * 地址不用填，填了也不会被采纳。
+   *
+   * 绑定的依据是签名 —— 地址是从签名里**恢复**出来的，不是用户声明的。
+   * 这不是省事：让用户报一个地址、再拿另一把钥匙去签，两者可以不是同一个，
+   * 那样的「绑定」什么也没证明。
+   *
+   * 但默默忽略参数比不支持更糟：用户打了地址，看到一模一样的回复，
+   * 会以为自己填错了而反复重来（实测就发生了）。所以明说一句。
+   */
+  if (arg) {
+    await sendMessage(chatId, [
+      esc("不用填地址 —— 地址是从你的签名里算出来的，不是你报给我的。"),
+      esc("（你报一个地址、却用另一把钥匙签名，这样的「绑定」什么也证明不了。）"),
+      "",
+      esc("下面这段就是要签的内容："),
+    ].join("\n"));
+  }
   const nonce = newNonce();
   const issuedAt = Date.now();
   session.setFlow(userId, "bind", { nonce, issuedAt });

@@ -6,15 +6,21 @@ import * as cmd from "./commands.js";
 import * as repcmd from "./repcommands.js";
 import * as quotacmd from "./quotacommands.js";
 import { start as startWatcher } from "./watcher.js";
+import { route } from "./routing.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
 /// 用户可能在任意一条消息里粘贴私钥或助记词。
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
+/// 机器人自己的用户名，用来生成「来私聊」的深链。main() 里填。
+let botUsername = "";
+
+
 async function onMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const text = msg.text ?? "";
+  const isPrivate = msg.chat.type === "private";
 
   if (!session.rateLimit(userId)) {
     await sendMessage(chatId, esc("操作太频繁了，请稍后再试。"));
@@ -31,39 +37,54 @@ async function onMessage(msg) {
     return;
   }
 
-  if (text.startsWith("/")) {
-    const [raw, ...args] = text.split(/\s+/);
-    const command = raw.split("@")[0];
-    log(`user=${userId} cmd=${command}`);
+  const r = route({ chatType: msg.chat.type, text, hasFlow: cmd.hasFlow(userId) });
 
-    switch (command) {
-      case "/start": return cmd.cmdStart(chatId);
-      case "/help": return cmd.cmdHelp(chatId);
-      case "/bind": return cmd.cmdBind(chatId, userId);
-      case "/whoami": return cmd.cmdWhoami(chatId, userId);
-      case "/new": return cmd.cmdNew(chatId, userId);
-      case "/deals": return cmd.cmdDeals(chatId, userId);
-      case "/deal": return cmd.cmdDeal(chatId, userId, args[0] ?? "");
-      case "/rep": return repcmd.cmdRep(chatId, userId, args[0] ?? "");
-      case "/bond": return repcmd.cmdBond(chatId, userId, args[0] ?? "");
-      case "/unbond": return repcmd.cmdUnbond(chatId, userId);
-      case "/record": return repcmd.cmdRecord(chatId, userId, args[0] ?? "");
-      case "/quota": return quotacmd.cmdQuota(chatId, userId, args[0] ?? "", args[1] ?? "");
-      case "/unquota": return quotacmd.cmdUnquota(chatId, userId, args[0] ?? "");
-      case "/cancel":
-        session.clearFlow(userId);
-        return sendMessage(chatId, esc("已退出当前流程。"));
-      default:
-        return sendMessage(chatId, esc("未知命令。/help 查看全部命令。"));
-    }
+  if (r.action === "ignore") return;
+
+  if (r.action === "private-only") {
+    const deep = botUsername ? `https://t.me/${botUsername}?start=1` : null;
+    log(`user=${userId} cmd=${r.command} 群里拒绝`);
+    return sendMessage(chatId, [
+      esc(`${r.command} 只能在私聊里用。`),
+      "",
+      esc("它会打出你的地址和交易，在群里等于替你公开持仓；而且绑定和开单是多步流程，"),
+      esc("群里的每一条发言都会被当成流程输入。"),
+      deep ? `\n[👉 点这里私聊我](${deep})` : "",
+    ].join("\n"));
   }
 
-  if (cmd.hasFlow(userId)) {
+  if (r.action === "flow") {
     log(`user=${userId} flow-input`);
     return cmd.handleFlowInput(chatId, userId, text);
   }
 
-  await sendMessage(chatId, esc("发送 /help 查看可用命令。"));
+  if (r.action === "hint") {
+    return sendMessage(chatId, esc("发送 /help 查看可用命令。"));
+  }
+
+  const { command, args } = r;
+  log(`user=${userId} cmd=${command} private=${isPrivate}`);
+
+  switch (command) {
+    case "/start": return cmd.cmdStart(chatId);
+    case "/help": return cmd.cmdHelp(chatId);
+    case "/bind": return cmd.cmdBind(chatId, userId, args[0] ?? "");
+    case "/whoami": return cmd.cmdWhoami(chatId, userId);
+    case "/new": return cmd.cmdNew(chatId, userId);
+    case "/deals": return cmd.cmdDeals(chatId, userId);
+    case "/deal": return cmd.cmdDeal(chatId, userId, args[0] ?? "");
+    case "/rep": return repcmd.cmdRep(chatId, userId, args[0] ?? "");
+    case "/bond": return repcmd.cmdBond(chatId, userId, args[0] ?? "");
+    case "/unbond": return repcmd.cmdUnbond(chatId, userId);
+    case "/record": return repcmd.cmdRecord(chatId, userId, args[0] ?? "");
+    case "/quota": return quotacmd.cmdQuota(chatId, userId, args[0] ?? "", args[1] ?? "");
+    case "/unquota": return quotacmd.cmdUnquota(chatId, userId, args[0] ?? "");
+    case "/cancel":
+      session.clearFlow(userId);
+      return sendMessage(chatId, esc("已退出当前流程。"));
+    default:
+      return sendMessage(chatId, esc("未知命令。/help 查看全部命令。"));
+  }
 }
 
 async function onCallback(q) {
@@ -99,6 +120,7 @@ async function main() {
   session.load();
 
   const me = await getMe();
+  botUsername = me.username;
   log(`已连接 @${me.username}`);
 
   await setMyCommands([
