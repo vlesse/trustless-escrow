@@ -9,3 +9,20 @@ out/
 slither.json
 slither.txt
 .testnet-wallets.json
+
+# 运行时状态。绝不能进仓库 —— 这是个公开仓库。
+#
+# .bot-state.json 里是 Telegram 账号与钱包地址的绑定关系。提交它等于把
+# 「谁是谁」公开发布，而这条关联一旦公开就收不回来。
+#
+# .sim-jury-salts.json 是陪审员投票的 salt。salt 泄露意味着别人能在揭示
+# 之前算出你投了什么 —— 承诺-揭示这套机制的全部意义就没了。
+.bot-state.json
+.keeper-state.json
+.proposer-state.json
+.sim-dispute.json
+.sim-jury-salts.json
+logs/
+services/*/.env
+services/*/.*-state.json
+deployments-localhost.json
