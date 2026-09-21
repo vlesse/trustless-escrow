@@ -10,7 +10,7 @@ process.env.ESCROW_FACTORY ??= "0x0000000000000000000000000000000000000001";
 process.env.CHAIN_ID ??= "42161";
 
 const { scanForSecrets, SecretKind } = await import("../src/secrets.js");
-const { buildChallenge, newNonce, verifyBinding } = await import("../src/wallet.js");
+const { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } = await import("../src/wallet.js");
 const { availableActions, State } = await import("../src/deals.js");
 const { validateStep } = await import("../src/commands.js");
 const { buildTx, buildDepositFlow, ESCROW_ABI, FACTORY_ABI } = await import("../src/txlink.js");
@@ -114,7 +114,8 @@ describe("钱包绑定签名校验", () => {
 
   test("过期的挑战被拒绝", async () => {
     const nonce = newNonce();
-    const issuedAt = Date.now() - 11 * 60 * 1000;
+    // 从常量算，别写死分钟数：有效期调过一次，写死 11 分钟的这行就跟着假了
+    const issuedAt = Date.now() - (CHALLENGE_TTL_MIN * 60 * 1000 + 60_000);
     const sig = await wallet.signMessage(buildChallenge(userId, nonce, issuedAt));
     const r = verifyBinding({ telegramUserId: userId, nonce, issuedAt, signature: sig });
     assert.equal(r.ok, false);

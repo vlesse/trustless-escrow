@@ -3,7 +3,7 @@ import { config } from "./config.js";
 import { esc, sendMessage, keyboard, btn, urlBtn } from "./telegram.js";
 import * as session from "./session.js";
 import * as rep from "./reputation.js";
-import { buildChallenge, newNonce, verifyBinding } from "./wallet.js";
+import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wallet.js";
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
   tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State,
@@ -168,7 +168,7 @@ export async function cmdBind(chatId, userId, arg = "") {
           esc("然后把得到的签名（0x 开头）直接发给我。"),
         ]),
     "",
-    esc("10 分钟内有效。/cancel 退出。"),
+    esc(`${CHALLENGE_TTL_MIN} 分钟内有效。/cancel 退出。`),
   ].join("\n"));
 }
 

@@ -67,3 +67,50 @@ describe("群聊分流", () => {
     assert.equal(grp("/bind").action, "private-only");
   });
 });
+
+// ---------------------------------------------------------------------------
+
+const wallet = await import("../src/wallet.js");
+
+/**
+ * 绑定挑战的有效期。
+ *
+ * 这个数字在三个地方出现过：常量、过期提示、/bind 的说明文字。
+ * 三处各写一遍的时候，改一处就等于另外两处开始说谎，而说谎的那两处
+ * 恰恰是用户唯一看得见的。
+ */
+describe("绑定挑战有效期", () => {
+  test("有效期足够第一次用的人走完 —— 10 分钟实测不够", () => {
+    assert.ok(wallet.CHALLENGE_TTL_MIN >= 30,
+      "装钱包、加测试网、切网络、看懂页面，十分钟走不完，签回来就过期了");
+  });
+
+  test("刚签的通过时间检查", () => {
+    const nonce = wallet.newNonce();
+    const r = wallet.verifyBinding({
+      telegramUserId: 1, nonce, issuedAt: Date.now(), signature: "0xdead",
+    });
+    // 签名本身是假的，所以一定失败；但不能是「过期」那个原因
+    assert.equal(r.ok, false);
+    assert.ok(!/过期/.test(r.reason), "刚发出的挑战不该被判过期：" + r.reason);
+  });
+
+  test("超过有效期就拒绝，并说明那串签名作废即可", () => {
+    const old = Date.now() - (wallet.CHALLENGE_TTL_MIN * 60 * 1000 + 1000);
+    const r = wallet.verifyBinding({
+      telegramUserId: 1, nonce: wallet.newNonce(), issuedAt: old, signature: "0xdead",
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /过期/);
+    assert.match(r.reason, new RegExp(String(wallet.CHALLENGE_TTL_MIN)),
+      "提示里的分钟数必须来自常量，不能手写");
+    assert.match(r.reason, /不授予任何权限/,
+      "用户会担心那串签名泄露了什么，这句话要在错误里就说清楚");
+  });
+
+  test("没发起过挑战就提交签名，提示去 /bind 而不是报过期", () => {
+    const r = wallet.verifyBinding({ telegramUserId: 1, signature: "0xdead" });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /\/bind/);
+  });
+});

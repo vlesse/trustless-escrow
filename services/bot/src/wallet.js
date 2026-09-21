@@ -11,7 +11,21 @@ import { ethers } from "ethers";
 /// 这是标准的 "Sign-In with Ethereum" 思路，全程离线、零 gas、
 /// 且签名内容本身不构成任何授权（不是交易，无法被重放去动钱）。
 
-const CHALLENGE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+/**
+ * 挑战有效期。
+ *
+ * 原来是 10 分钟，实测太紧：第一次用的人要装钱包、加测试网、切网络、
+ * 还要看懂页面在说什么，十分钟走不完，于是签完发回来时已经过期。
+ *
+ * 放宽的代价很小。这个签名**什么也不授予** —— 它不是交易，无法被重放去
+ * 动任何钱；而且机器人只认「当前这个 Telegram 账号、当前这次 /bind」的
+ * 随机串，换个人拿去用对不上，同一个人成功一次之后流程也随即清空。
+ * 有效期在这里限制的是一个待办事项能挂多久，不是一把钥匙能用多久。
+ *
+ * 对外文案一律从这里取，不要再手写数字 —— 三处各写一遍，改一处就会说谎。
+ */
+export const CHALLENGE_TTL_MIN = 30;
+const CHALLENGE_TTL_MS = CHALLENGE_TTL_MIN * 60 * 1000;
 
 /// 挑战文本刻意写成人类可读的形式，让用户在钱包弹窗里能看懂自己在签什么。
 /// 明确声明「这不是一笔交易」，是为了对抗那种诱导用户盲签的攻击习惯 ——
@@ -44,7 +58,7 @@ export function verifyBinding({ telegramUserId, nonce, issuedAt, signature, clai
   if (!nonce || !issuedAt) return { ok: false, reason: "没有待验证的绑定挑战，请先发 /bind" };
 
   if (Date.now() - issuedAt > CHALLENGE_TTL_MS) {
-    return { ok: false, reason: "挑战已过期（超过 10 分钟），请重新发起 /bind" };
+    return { ok: false, reason: `挑战已过期（超过 ${CHALLENGE_TTL_MIN} 分钟）。那串签名不授予任何权限，作废即可；请重新发起 /bind` };
   }
 
   const message = buildChallenge(telegramUserId, nonce, issuedAt);
