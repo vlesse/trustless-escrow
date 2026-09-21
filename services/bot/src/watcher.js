@@ -151,7 +151,7 @@ export function describeDeadline(deal, kind, remaining) {
 // ------------------------------------------------------------------ 主循环
 
 /// 发现与已绑定用户相关的交易。
-async function discoverDeals(fromBlock, toBlock, tracked) {
+async function discoverDeals(notify, fromBlock, toBlock, tracked) {
   const logs = await getLogsChunked({
     provider,
     filter: {
@@ -166,8 +166,44 @@ async function discoverDeals(fromBlock, toBlock, tracked) {
     if (!p) continue;
     const parties = [p.args.buyer, p.args.seller];
     // 只跟踪至少有一方绑定了 Telegram 的交易 —— 其余的推给谁都没有
-    if (parties.some((a) => session.findUsersByAddress(a).length > 0)) {
-      tracked.add(ethers.getAddress(p.args.deal));
+    if (!parties.some((a) => session.findUsersByAddress(a).length > 0)) continue;
+
+    const deal = ethers.getAddress(p.args.deal);
+    tracked.add(deal);
+
+    /*
+     * 开单也要通知。
+     *
+     * 原来只在入金之后才说话，于是签完「创建交易」的那一刻什么都没有 ——
+     * 而那恰恰是用户最不确定的时刻：签名到底成没成？实测第一个真实用户
+     * 就卡在这里问「机器人也没说我签没签」。
+     *
+     * 更实际的问题是拿不到合约地址：地址只在事件里，用户手上只有一个
+     * 交易哈希，而下一步 /deal 要的是地址。不给地址等于让他自己去区块
+     * 浏览器里翻日志。
+     */
+    const key = `deal-created:${deal}`;
+    if (session.alreadyNotified(key)) continue;
+
+    const info = await tokenInfo(p.args.token, provider).catch(() => null);
+    const amt = (v) => (info ? fmtAmount(v, info) : v.toString());
+    const text = [
+      "🆕 *交易已创建*",
+      "",
+      `合约: \`${esc(deal)}\``,
+      `货款: ${esc(amt(p.args.price))}`,
+      `保证金: 买 ${esc(amt(p.args.buyerBond))} / 卖 ${esc(amt(p.args.sellerBond))}`,
+      "",
+      esc("现在还没有锁定任何资金，双方各自入金后才正式生效。在此之前任一方都可无损取消。"),
+      "",
+      esc("下一步：发送下面这条命令取入金交易"),
+      `\`/deal ${esc(deal)}\``,
+    ].join("\n");
+
+    for (const a of parties) {
+      for (const chatId of session.findUsersByAddress(a)) {
+        await notify(chatId, text).catch((e) => console.error("开单通知失败:", e.message));
+      }
     }
   }
 }
@@ -326,7 +362,7 @@ export async function start(notify) {
        * 就按 txHash+logIndex 去重，重扫不会重复打扰用户。
        */
       for (const [lo, hi] of ranges(last + 1, safe)) {
-        await discoverDeals(lo, hi, tracked);
+        await discoverDeals(notify, lo, hi, tracked);
         await processEvents(notify, tracked, lo, hi);
         await scanDraws(notify, lo, hi);
         last = hi;
