@@ -9,7 +9,7 @@
     "start": "node src/index.js",
     "dry-run": "DRY_RUN=true node src/index.js",
     "once": "node src/index.js --once",
-    "test": "node --test test/keeper.test.js test/abi.test.js test/window.test.js test/decode.test.js"
+    "test": "node --test test/keeper.test.js test/abi.test.js test/window.test.js test/decode.test.js test/tick.test.js"
   },
   "dependencies": {
     "ethers": "^6.13.4"

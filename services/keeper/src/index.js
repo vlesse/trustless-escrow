@@ -7,6 +7,7 @@
 /// 它的钥匙偷走一文不值：能做的每一件事，合约上任何人都能做。
 import fs from "node:fs";
 import { ethers } from "ethers";
+import { pathToFileURL } from "node:url";
 import { config, describeConfig } from "./config.js";
 import * as chain from "./chain.js";
 import * as tasks from "./tasks.js";
@@ -112,9 +113,23 @@ async function collectDeals(clients, state, ctx, toBlock) {
   return out;
 }
 
-async function tick(clients, state) {
-  const blockNumber = await clients.provider.getBlockNumber();
-  const block = await clients.provider.getBlock(blockNumber);
+export async function tick(clients, state) {
+  /*
+   * 一次取回块高和时间戳，而不是先 getBlockNumber 再 getBlock(那个号)。
+   *
+   * 公共 RPC 后面是一组节点。先问「现在第几块」拿到的是 A 节点的答案，
+   * 再去取那一块可能落到还没同步到的 B 节点上，返回 null ——
+   * 然后 block.timestamp 直接抛，整轮推进全部作废。实测发生过。
+   *
+   * 问 "latest" 只有一次往返：号和时间戳必然来自同一个块，也就不存在
+   * 「问到的块自己不认识」这回事。拿不到就跳过这一轮，下一轮再说。
+   */
+  const block = await clients.provider.getBlock("latest");
+  if (!block) {
+    log("RPC 暂时取不到最新区块，跳过本轮");
+    return;
+  }
+  const blockNumber = block.number;
   const ctx = { now: block.timestamp, blockNumber };
 
   const all = [
@@ -171,7 +186,19 @@ async function main() {
   log(`已启动，每 ${config.pollIntervalMs / 1000} 秒扫描一次`);
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+/*
+ * 只在被直接运行时才启动主循环。
+ *
+ * 不加这个判断，任何 import 这个模块的测试都会把 keeper 真跑起来 ——
+ * 连着 RPC、开着定时器，测试进程永远不退出。想给 tick 补一条测试时
+ * 正好撞上了。
+ */
+const runDirectly = process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (runDirectly) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
