@@ -19,23 +19,50 @@ import * as quotacmd from "./quotacommands.js";
 
 const provider = makeProvider();
 
+/**
+ * 每一步在干什么，用一句人话说明。
+ *
+ * 「授权」尤其需要：它不转账，只是允许托管合约在下一步划走固定额度。
+ * 不解释的话，用户会以为自己已经付过一次钱，然后对第二步「入金」感到困惑。
+ */
+const TX_NOTE = {
+  approve: "这一步不转账。它只是允许下面那个托管合约划走固定额度的代币；" +
+    "额度只给这一笔所需，不是无限授权。钱要到下一步才真正锁进合约。",
+  depositBuyer: "这一步真正把钱锁进托管合约。锁进去之后就只能按合约规则流转，" +
+    "任何人都无法挪用，包括运营方。",
+  depositSeller: "这一步真正把保证金锁进托管合约。",
+};
+
 /// 把一个交易请求渲染成可签名的三种形式。
 ///
 /// 三种都给，是因为用户的资金不应当依赖任何一个环节存活：
 /// 签名页可能挂、机器人可能被封，但只要用户手里有 to + calldata，
 /// 任何钱包都能完成这笔操作。
-function renderTx(tx, idx = null, total = null) {
-  const step = idx !== null ? `*第 ${idx}/${total} 步 · ${esc(tx.label)}*\n` : `*${esc(tx.label)}*\n`;
-  const lines = [
-    step,
-    `合约: \`${esc(tx.to)}\``,
-    `链 ID: ${tx.chainId}`,
-    "",
-    "*calldata*（任何钱包都可手工粘贴）:",
-    `\`${esc(tx.data)}\``,
-  ];
-  const rows = [];
+///
+/// 但顺序要摆对。原来第一眼看到的是 calldata —— 那是给「机器人没了还要
+/// 自己动手」准备的兜底路径，对第一次用的人毫无意义。实测用户连着问了两次
+/// 「在哪里授权」，因为消息里根本没有一句话说该点按钮。
+/// 现在：先说这步干什么，再说点下面的按钮，calldata 退到最后。
+export function renderTx(tx, idx = null, total = null) {
+  const step = idx !== null ? `*第 ${idx}/${total} 步 · ${esc(tx.label)}*` : `*${esc(tx.label)}*`;
   const link = toSigningLink(tx);
+  const note = TX_NOTE[tx.method];
+
+  const lines = [step, ""];
+  if (note) lines.push(esc(note), "");
+  lines.push(link
+    ? esc("👇 点下面的按钮，在你自己的钱包里签名。")
+    : esc("把下面的 calldata 粘进任何钱包发送即可。"));
+  lines.push(
+    "",
+    `合约: \`${esc(tx.to)}\``,
+    `链 ID: ${esc(tx.chainId)}`,
+    "",
+    esc("calldata（签名页打不开时，可手工粘进任何钱包）:"),
+    `\`${esc(tx.data)}\``,
+  );
+
+  const rows = [];
   if (link) rows.push([urlBtn(`✍️ 签名：${tx.label}`, link)]);
   return { text: lines.join("\n"), extra: rows.length ? keyboard(rows) : {} };
 }

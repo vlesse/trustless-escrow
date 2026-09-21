@@ -14,6 +14,9 @@ import assert from "node:assert/strict";
 process.env.TELEGRAM_BOT_TOKEN ??= "test:token";
 process.env.RPC_URL ??= "http://127.0.0.1:8545";
 process.env.ESCROW_FACTORY ??= "0x0000000000000000000000000000000000000001";
+// 配上签名页：线上就是配着的，不配走的是「没有按钮」那条兜底分支，
+// 测出来的东西和用户实际看到的不是同一个。
+process.env.SIGNING_PAGE_URL ??= "https://example.test";
 
 const { esc, unesc } = await import("../src/telegram.js");
 
@@ -252,6 +255,57 @@ describe("仲裁层提示", () => {
   test("这一段本身没有漏转义", () => {
     for (const fa of [null, BASE.arbitrator, "0x0000000000000000000000000000000000000009"]) {
       const bad = unescapedReserved(render(fa));
+      assert.deepEqual(bad, [], bad.map((b) => `「${b.ch}」在 …${b.near}…`).join("；"));
+    }
+  });
+});
+
+const txlink = await import("../src/txlink.js");
+
+/**
+ * 待签交易的消息。
+ *
+ * 实测用户连着问了两次「在哪里授权」。原因不是按钮没有，是消息把 calldata
+ * 摆在最显眼处，却没有一句话说该点按钮 —— calldata 是给「机器人没了还要
+ * 自己动手」准备的兜底路径，对第一次用的人毫无意义。
+ */
+describe("待签交易消息", () => {
+  const txs = txlink.buildDepositFlow({
+    token: A, escrow: "0x70D66C478F8c73f7eD6F67bB0b0357Fe917a635D",
+    amount: U("200.5"), role: "buyer",
+  });
+
+  test("先说这步在干什么，再叫人点按钮", () => {
+    const { text } = cmds.renderTx(txs[0], 1, 2);
+    assert.match(text, /不转账/, "授权最容易被误解成「已经付过一次钱」");
+    assert.match(text, /点下面的按钮/, "没有这句话，用户不知道该点哪里");
+    const posNote = text.indexOf("不转账");
+    const posData = text.indexOf("calldata");
+    assert.ok(posNote < posData, "解释必须排在 calldata 前面");
+  });
+
+  test("入金那步说清楚钱真的锁进去了", () => {
+    const { text } = cmds.renderTx(txs[1], 2, 2);
+    assert.match(text, /真正把钱锁进/);
+    assert.match(text, /无法挪用/);
+  });
+
+  test("calldata 仍然保留 —— 它是机器人挂掉之后的唯一出路", () => {
+    for (const tx of txs) {
+      const { text } = cmds.renderTx(tx, 1, 2);
+      assert.match(text, new RegExp(tx.data.slice(2, 12)), "calldata 不能省");
+    }
+  });
+
+  test("按钮跟着消息一起发出去", () => {
+    const { extra } = cmds.renderTx(txs[0], 1, 2);
+    const btns = JSON.stringify(extra);
+    assert.match(btns, /签名/, "没有按钮的话，那句「点下面的按钮」就成了假话");
+  });
+
+  test("没有漏转义", () => {
+    for (const tx of txs) {
+      const bad = unescapedReserved(cmds.renderTx(tx, 1, 2).text);
       assert.deepEqual(bad, [], bad.map((b) => `「${b.ch}」在 …${b.near}…`).join("；"));
     }
   });

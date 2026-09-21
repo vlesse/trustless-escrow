@@ -71,6 +71,9 @@ export function buildTx(kind, to, method, args, label) {
     value: "0",
     chainId: config.chainId,
     label,
+    // 方法名留着给展示层用：同一个 label 在不同语境下要配不同的解释，
+    // 而 kind 只说得出「这是个 ERC20 调用」，说不出「这是授权还是转账」。
+    method,
   };
 }
 
