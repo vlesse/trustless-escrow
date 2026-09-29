@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import { config } from "./config.js";
 import * as session from "./session.js";
-import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, fmtAmount, STATE_NAME, State, untilText, utcText } from "./deals.js";
+import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAllowance, fmtAmount, State, untilText } from "./deals.js";
 import * as juryalert from "./juryalert.js";
 import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
@@ -96,88 +96,179 @@ const short = (a) => `${a.slice(0, 8)}…${a.slice(-6)}`;
 /// 拒收整条消息 —— 不是显示错乱，是**根本发不出去**，用户什么都收不到。
 /// 地址放在 `` ` `` 代码块里，代码块内只需转义反引号与反斜杠，十六进制地址天然安全。
 const amt = (raw, info) => esc(fmtAmount(raw, info));
-/// 截止时间显示成「还剩多久」：用户关心的是这个，而且不受时区影响。
-const ts = (sec) => esc(`${untilText(sec)}（${utcText(sec)}）`);
+
+/**
+ * 截止时间：还剩多久 + 北京时间。
+ *
+ * 原来后面跟的是 UTC。这个机器人的用户几乎都在东八区，看到 UTC 要自己
+ * 加八小时 —— 而这正是会算错、然后错过截止的那一步。
+ */
+export function cnTime(sec) {
+  const d = new Date((Number(sec) + 8 * 3600) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `北京时间 ${d.getUTCMonth() + 1}月${d.getUTCDate()}日 ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+const when = (sec) => esc(`${untilText(sec)}（${cnTime(sec)} 截止）`);
+
+/**
+ * 进度条。五个阶段，走到哪一眼看得见。
+ *
+ * 用户从来不关心「状态 = Funded」，他关心的是「到哪一步了、还有几步」。
+ */
+const STAGES = ["开单", "入金", "交付", "验收", "放款"];
+export function progressLine(state) {
+  if (state === State.Cancelled) return "❎ 交易已取消";
+  if (state === State.Disputed) return "✅开单 → ✅入金 → ✅交付 → ⚖️争议中 → ⬜放款";
+  // 当前正在进行的是第几个阶段（从 0 数）
+  const now = { [State.Open]: 1, [State.Funded]: 2, [State.Delivered]: 3, [State.Resolved]: 5 }[state] ?? 0;
+  return STAGES.map((s, i) => (i < now ? "✅" : i === now ? "👉" : "⬜") + s).join(" → ");
+}
+
+/**
+ * 所有推送都用同一个格式。
+ *
+ *   标题：刚刚发生了什么
+ *   进度：到哪一步了
+ *   你要做的：一句话。什么都不用做，也要明说「什么都不用做」
+ *   补充：不做会怎样 / 可以随时怎样
+ *
+ * 为什么「什么都不用做」也要写出来：实测用户签完「标记已交付」回到
+ * Telegram，什么消息都没有，只能干瞪眼。没有消息不等于「你不用做什么」，
+ * 用户读到的是「是不是出错了」。
+ *
+ * title / youDo 传纯文本，在这里转义；lines / notes 传已经转义好的行。
+ */
+export function card({ icon, title, deal, lines = [], youDo, notes = [] }) {
+  return [
+    `${icon} *${esc(title)}*`,
+    `交易 \`${short(deal.address)}\``,
+    "",
+    esc(`进度：${progressLine(deal.state)}`),
+    ...(lines.length ? ["", ...lines] : []),
+    "",
+    `👉 *你要做的：*${esc(youDo)}`,
+    ...(notes.length ? ["", ...notes] : []),
+  ].join("\n");
+}
+
+/// 结算明细。只在能确定拆分方式的时候拆（正常成交）—— 仲裁的分法
+/// 很多，猜错一个数比不拆更糟。
+function settleBreakdown(role, args, deal, info) {
+  const got = role === "buyer" ? args.toBuyer : args.toSeller;
+  const fee = BigInt(args.fee ?? 0n);
+  if (role === "seller" && got === deal.price - fee + deal.sellerBond && got > 0n) {
+    return [
+      esc(`= 货款 ${fmtAmount(deal.price - fee, info)}（${fmtAmount(deal.price, info)} 扣掉 ${deal.feeBps / 100}% 手续费 ${fmtAmount(fee, info)}）`),
+      esc(`+ 你的押金退回 ${fmtAmount(deal.sellerBond, info)}`),
+    ];
+  }
+  if (role === "buyer" && got === deal.buyerBond && got > 0n) {
+    return [esc("= 你的押金原路退回（货款已经付给卖家了）")];
+  }
+  return [];
+}
 
 /// 把一条事件翻译成「发给谁、说什么」。
-/// 返回 [{to: "buyer"|"seller"|"both", text}]，由调用方解析成实际的 Telegram 用户。
+/// 返回 [{to: "buyer"|"seller", text}]。**每个事件双方都要收到** ——
+/// 做了操作的那一方需要回执，另一方需要知道轮到自己了。
 export function describeEvent(name, args, deal, info) {
-  const tag = `\`${short(deal.address)}\``;
+  const both = (make) => ["buyer", "seller"].map((r) => ({ to: r, text: make(r) }));
 
   switch (name) {
     case "Deposited": {
+      // 双方都入金时不在这里说，交给紧随其后的 Activated —— 否则第二个入金的
+      // 人会在同一秒收到「你的钱存进去了」和「交易生效了」两条。
+      if (deal.buyerFunded && deal.sellerFunded) return [];
       const who = args.party.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
       const other = who === "buyer" ? "seller" : "buyer";
-      const both = deal.buyerFunded && deal.sellerFunded;
-
-      /*
-       * 入金的人自己也要收到回执。
-       *
-       * 原来只通知对方 —— 于是你签完一笔把钱锁进合约的交易，机器人一声不吭。
-       * 实测这正是真实用户反复问的那句「我签没签上？」。签名之后的沉默比
-       * 报错更难受：报错至少是个结论。
-       *
-       * 而且还要顺带回答他的下一个问题：对方迟迟不入金怎么办。答案是
-       * 随时可以无损退出，但这件事必须在他刚锁完钱、正准备干等的那一刻说，
-       * 不是藏在某个帮助页里。
-       */
       return [
-        {
-          to: other,
-          text: `💰 ${tag}\n对方已入金 ${amt(args.amount, info)}。\n` +
-            (both ? "双方资金均已锁定。" : "等待你入金后交易才会锁定。"),
-        },
         {
           to: who,
-          text: `✅ ${tag}\n你的 ${amt(args.amount, info)} 已锁进托管合约。\n` +
-            (both
-              ? "双方都已入金，这笔交易正式生效。"
-              : "还差对方那一笔，现在还没有正式生效。\n\n" +
-                "对方一直不入金也不要紧：生效之前任何一方都可以随时「取消交易」，" +
-                "你的钱原路退回，不收任何费用。"),
+          text: card({
+            icon: "✅", title: "你的钱已经存进去了", deal,
+            lines: [esc(`你存入了 ${fmtAmount(args.amount, info)}，现在锁在这笔交易的合约里。`)],
+            youDo: "等对方入金。现在什么都不用做，对方入金后我会通知你。",
+            notes: [esc("对方一直不入金也没关系：交易生效之前，你随时可以点「取消交易」，钱原路退回你的钱包，一分不少。")],
+          }),
+        },
+        {
+          to: other,
+          text: card({
+            icon: "💰", title: "对方已经入金了", deal,
+            lines: [esc(`对方存入了 ${fmtAmount(args.amount, info)}。`)],
+            youDo: "轮到你入金了。点下面的「入金」按钮。",
+            notes: [esc("你入金之后，交易正式生效。")],
+          }),
         },
       ];
     }
 
-    case "Activated": {
-      const when = ts(args.deliveryDeadline);
-      return [
-        { to: "seller", text: `🔒 ${tag}\n双方资金已锁定，请在 ${when} 前完成交付并标记。\n逾期买家可单方面取回全款。` },
-        { to: "buyer", text: `🔒 ${tag}\n双方资金已锁定，等待卖家交付（截止 ${when}）。` },
-      ];
-    }
+    case "Activated":
+      return both((r) => card({
+        icon: "🔒", title: "双方都入金了，交易正式生效", deal,
+        youDo: r === "seller"
+          ? "把货交给买家，然后点下面的「标记已交付」。"
+          : "等卖家发货。现在什么都不用做。",
+        notes: r === "seller"
+          ? [`⏰ 交付截止：${when(args.deliveryDeadline)}`,
+             esc("⚠️ 超过这个时间还没点「标记已交付」，买家可以把钱全部拿回去。")]
+          : [`⏰ 卖家交付截止：${when(args.deliveryDeadline)}`,
+             esc("卖家超时没交付，你可以把钱全部拿回来。"),
+             esc("如果已经收到货、确认没问题，也可以随时直接点「确认收货」。")],
+      }));
 
-    case "DeliveryMarked": {
-      const when = ts(args.inspectionDeadline);
-      return [{
-        to: "buyer",
-        text: `📦 ${tag}\n卖家已标记交付，验收期至 ${when}。\n\n` +
-          `*逾期未操作，货款将自动放给卖家。* 请及时确认收货或提起争议。`,
-      }];
-    }
+    case "DeliveryMarked":
+      return both((r) => card({
+        icon: "📦",
+        title: r === "seller" ? "你已标记交付" : "卖家说已经交付了",
+        deal,
+        youDo: r === "seller"
+          ? "等买家验收。现在什么都不用做。"
+          : "去检查你收到的东西。\n· 没问题 → 点「确认收货」，钱打给卖家\n· 有问题 → 点「提起争议」",
+        notes: r === "seller"
+          ? [`⏰ 验收截止：${when(args.inspectionDeadline)}`,
+             esc("买家在截止前确认收货，或者到时间没有任何操作，钱都会打给你。")]
+          : [`⏰ 验收截止：${when(args.inspectionDeadline)}`,
+             `*${esc("⚠️ 到时间你不操作，钱会自动打给卖家，不能撤回。")}*`],
+      }));
 
     case "DisputeRaised": {
-      const who = args.by.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
-      const other = who === "buyer" ? "seller" : "buyer";
-      return [{
-        to: other,
-        text: `⚖️ ${tag}\n对方提起了争议。\n\n请尽快提交证据——仲裁层只看提交上来的材料。\n` +
-          `条款原文哈希对得上的那份才会被认定为真本，请提交你保存的原文。`,
-      }];
+      const raiser = args.by.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
+      return both((r) => card({
+        icon: "⚖️",
+        title: r === raiser ? "你已提起争议" : "对方提起了争议",
+        deal,
+        youDo: "把能证明你说法的材料交上去：点下面的「提交证据」。聊天截图、付款记录、物流信息都算。",
+        notes: [
+          esc("仲裁只看双方交上去的材料。你不交，就只能按对方的材料判。"),
+          esc("钱会一直锁在合约里，直到出结果。这期间谁都动不了，包括平台。"),
+        ],
+      }));
     }
 
     case "Ruled": {
-      const r = Number(args.ruling);
-      const outcome = r === 1 ? "买家胜" : r === 2 ? "卖家胜" : esc("拒裁（中性拆分）");
-      return [{ to: "both", text: `⚖️ ${tag}\n裁决已下达：*${outcome}*` }];
+      const rr = Number(args.ruling);
+      const outcome = rr === 1 ? "买家胜" : rr === 2 ? "卖家胜" : "不判输赢，双方按规则拆分";
+      return both(() => card({
+        icon: "⚖️", title: `仲裁结果：${outcome}`, deal,
+        youDo: "什么都不用做。钱会按结果自动分配，到账后我会再通知你。",
+      }));
     }
 
     case "Settled": {
-      const st = Number(args.finalState);
-      return [
-        { to: "buyer", text: `✅ ${tag}\n交易已结束（${STATE_NAME[st]}）。\n你收到 ${amt(args.toBuyer, info)}。` },
-        { to: "seller", text: `✅ ${tag}\n交易已结束（${STATE_NAME[st]}）。\n你收到 ${amt(args.toSeller, info)}。` },
-      ];
+      const cancelled = Number(args.finalState) === State.Cancelled;
+      return both((r) => {
+        const got = r === "buyer" ? args.toBuyer : args.toSeller;
+        return card({
+          icon: cancelled ? "❎" : "✅",
+          title: cancelled ? "交易已取消，钱已退回" : "交易完成",
+          deal,
+          lines: got > 0n
+            ? [`你收到了 *${amt(got, info)}*`, ...settleBreakdown(r, args, deal, info)]
+            : [esc("这笔交易你这边没有收到钱。")],
+          youDo: "什么都不用做了。钱已经到你钱包里了，这笔交易到此结束。",
+        });
+      });
     }
 
     default:
@@ -187,21 +278,72 @@ export function describeEvent(name, args, deal, info) {
 
 /// 到期提醒。只对「不作为会造成损失」的那一方发。
 export function describeDeadline(deal, kind, remaining) {
-  const tag = `\`${short(deal.address)}\``;
-  const left = esc(fmtRemaining(remaining));
-
+  const left = fmtRemaining(remaining);
   if (kind === "delivery") {
     return {
       to: "seller",
-      text: `⏰ ${tag}\n交付期还剩 *${left}*。\n\n` +
-        `逾期未标记交付，买家可单方面取回全部货款与保证金。`,
+      text: card({
+        icon: "⏰", title: `交付期只剩 ${left} 了`, deal,
+        youDo: "把货交给买家，然后点下面的「标记已交付」。",
+        notes: [esc("⚠️ 超时还没点，买家可以把钱全部拿回去。")],
+      }),
     };
   }
   return {
     to: "buyer",
-    text: `⏰ ${tag}\n验收期还剩 *${left}*。\n\n` +
-      `*逾期未操作，货款将自动放给卖家，且不可撤销。*\n` +
-      `请确认收货，或在此之前提起争议。`,
+    text: card({
+      icon: "⏰", title: `验收期只剩 ${left} 了`, deal,
+      youDo: "检查你收到的东西：没问题点「确认收货」，有问题点「提起争议」。",
+      notes: [`*${esc("⚠️ 到时间你不操作，钱会自动打给卖家，不能撤回。")}*`],
+    }),
+  };
+}
+
+/// 开单通知。双方各自要存多少不一样，所以按角色分开说。
+export function describeCreated(deal, info) {
+  return ["buyer", "seller"].map((r) => {
+    const need = r === "buyer" ? deal.price + deal.buyerBond : deal.sellerBond;
+    const why = r === "buyer"
+      ? `货款 ${fmtAmount(deal.price, info)} + 押金 ${fmtAmount(deal.buyerBond, info)}`
+      : `押金 ${fmtAmount(deal.sellerBond, info)}`;
+    return {
+      to: r,
+      text: card({
+        icon: "🆕", title: "交易已创建", deal,
+        lines: [
+          esc(`你在这笔交易里是${r === "buyer" ? "买家" : "卖家"}。`),
+          esc(`你要存入：${fmtAmount(need, info)}（${why}）`),
+        ],
+        youDo: "点下面的「入金」按钮。",
+        notes: [esc("现在还没有锁定任何钱。双方都入金后交易才生效；在那之前，任何一方都可以取消，不损失任何东西。")],
+      }),
+    };
+  });
+}
+
+/**
+ * 只签了「授权」、没签「入金」。
+ *
+ * 入金要签两笔。第一笔「授权」不转账，只是允许合约下一步把钱划走 ——
+ * 但对不懂的人来说，签了一笔、钱包里弹过窗，就等于「付过了」。
+ * 他会以为自己入金了，然后等对方，而对方看到的是他一直没入金。
+ */
+export function approvedOnly({ funded, allowance, need }) {
+  return !funded && BigInt(need) > 0n && BigInt(allowance) >= BigInt(need);
+}
+
+export function describeApprovedOnly(deal, role, info) {
+  const need = role === "buyer" ? deal.price + deal.buyerBond : deal.sellerBond;
+  return {
+    to: role,
+    text: card({
+      icon: "⚠️", title: "你还差一步，钱还没存进去", deal,
+      lines: [
+        esc("你签了第 1 步「授权」，但还没签第 2 步「入金」。"),
+        esc(`授权不会转账。你的 ${fmtAmount(need, info)} 现在还在你自己的钱包里，对方看到的是你还没入金。`),
+      ],
+      youDo: "点下面的「入金」按钮，这次只需要签 1 步。",
+    }),
   };
 }
 
@@ -242,26 +384,17 @@ async function discoverDeals(notify, fromBlock, toBlock, tracked) {
     const key = `deal-created:${deal}`;
     if (session.alreadyNotified(key)) continue;
 
-    const info = await tokenInfo(p.args.token, provider).catch(() => null);
-    const amt = (v) => (info ? fmtAmount(v, info) : v.toString());
-    const text = [
-      "🆕 *交易已创建*",
-      "",
-      `合约: \`${esc(deal)}\``,
-      `货款: ${esc(amt(p.args.price))}`,
-      `保证金: 买 ${esc(amt(p.args.buyerBond))} / 卖 ${esc(amt(p.args.sellerBond))}`,
-      "",
-      esc("现在还没有锁定任何资金，双方各自入金后才正式生效。在此之前任一方都可无损取消。"),
-      "",
-      esc("下一步：发送下面这条命令取入金交易"),
-      `\`/deal ${esc(deal)}\``,
-    ].join("\n");
-
-    for (const a of parties) {
-      for (const chatId of session.findUsersByAddress(a)) {
-        await notify(chatId, text, keyboard([[btn("查看这笔交易", `deal:${deal}`)]]))
-          .catch((e) => console.error("开单通知失败:", e.message));
+    // 按角色分开说（双方要存的钱不一样），并且直接带上「入金」按钮 ——
+    // 原来只给一条 /deal 命令，用户得先复制命令、再点按钮，多一步就多一个人卡住。
+    try {
+      const d = await loadDeal(deal, provider);
+      const info = await tokenInfo(d.token, provider);
+      for (const m of describeCreated(d, info)) {
+        const full = `\n\n合约地址（发给对方核对用）：\n\`${esc(deal)}\``;
+        await pushTo(notify, d, m.to, m.text + full);
       }
+    } catch (e) {
+      console.error("开单通知失败:", e.message);
     }
   }
 }
@@ -354,15 +487,45 @@ export function describeStalled(deal, waited) {
   if (deal.buyerFunded === deal.sellerFunded) return null;
   return {
     to: deal.buyerFunded ? "buyer" : "seller",
-    // 先拼再转义，只转一次。先转义再插值会把反斜杠又转一遍，用户看到满屏 \\.
-    text: [
-      `⏳ \`${short(deal.address)}\``,
-      esc(`你已入金 ${fmtRemaining(waited)}了，对方一直没有入金，这笔交易还没有生效。`),
-      "",
-      esc("你随时可以「取消交易」把钱原路取回，不收任何费用 —— 生效之前退出是无损的。"),
-      esc("当然也可以继续等，这个状态没有期限，你的钱不会因为放着而少掉。"),
-    ].join("\n"),
+    text: card({
+      icon: "⏳", title: "对方一直没有入金", deal,
+      lines: [esc(`你已经入金 ${fmtRemaining(waited)}了，对方还没入金，这笔交易还没有生效。`)],
+      youDo: "你可以继续等，也可以点「取消交易」把钱拿回来。",
+      notes: [esc("取消不收任何费用，钱原路退回你的钱包。继续等也没有损失，这个状态没有截止时间。")],
+    }),
   };
+}
+
+/**
+ * 签完授权多久还没入金，才算「停在半路」。
+ *
+ * 不能一看到就提醒：正常人签完第 1 步，页面会直接带他签第 2 步，前后
+ * 也就几十秒。这时候催他，等于在他正要做的时候说「你怎么还没做」。
+ */
+const APPROVE_GRACE_SEC = 3 * 60;
+
+async function remindApprovedOnly(notify, deal, now) {
+  for (const role of ["buyer", "seller"]) {
+    const funded = role === "buyer" ? deal.buyerFunded : deal.sellerFunded;
+    if (funded) continue;
+    const owner = role === "buyer" ? deal.buyer : deal.seller;
+    const need = role === "buyer" ? deal.price + deal.buyerBond : deal.sellerBond;
+
+    // 每笔交易是一个新合约地址，所以对这个地址的授权额度一定是为这笔签的，
+    // 不会被「以前给别的合约的无限授权」误判。
+    const allowance = await tokenAllowance(deal.token, owner, deal.address, provider).catch(() => 0n);
+    if (!approvedOnly({ funded, allowance, need })) continue;
+
+    const seenKey = `approved-seen:${deal.address}:${role}`;
+    session.alreadyNotified(seenKey);
+    const since = session.notifiedAt(seenKey);
+    if (!since || now - Math.floor(since / 1000) < APPROVE_GRACE_SEC) continue;
+    if (session.alreadyNotified(`approved-only:${deal.address}:${role}`)) continue;
+
+    const info = await tokenInfo(deal.token, provider);
+    const m = describeApprovedOnly(deal, role, info);
+    await pushTo(notify, deal, m.to, m.text);
+  }
 }
 
 async function remindStalled(notify, deal, now) {
@@ -397,6 +560,7 @@ async function checkDeadlines(notify, tracked) {
 
     // 只有一方入金、卡在「待入金」的单子，另有一套提醒逻辑
     if (deal.state === State.Open) {
+      await remindApprovedOnly(notify, deal, now);
       await remindStalled(notify, deal, now);
       continue;
     }

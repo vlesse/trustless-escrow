@@ -151,21 +151,48 @@ describe("真实消息的转义", () => {
     if (md) clean("renderAlert", md);
   });
 
+  /*
+   * 这条原来写的是 `if (m?.text) clean(...)` —— 可 describeEvent 返回的是数组，
+   * 数组没有 .text，于是条件永远为假，**这条测试从来没检查过任何一个字**。
+   * 全绿，但什么都没测。现在逐条检查，并且断言确实检查到了东西。
+   */
   test("链上事件推送", () => {
+    const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
     const deal = {
-      address: A, buyer: A, seller: A, token: A,
+      address: A, buyer: A, seller: B, token: A,
       price: U("100.5"), buyerBond: U("100.5"), sellerBond: U("100.5"),
-      state: 2, feeBps: 100,
+      state: 2, feeBps: 100, buyerFunded: true, sellerFunded: false,
       deliveryDeadline: 1800000000, inspectionDeadline: 1800003600,
     };
+    let checked = 0;
     for (const [name, args] of [
       ["Deposited", { party: A, amount: U("200.5") }],
-      ["DeliveryMarked", { seller: A, evidenceURI: "ipfs://x", inspectionDeadline: 1800003600 }],
-      ["Settled", { finalState: 3, toBuyer: U("0.5"), toSeller: U("199.5"), toArbitrator: 0n, fee: U("1.005") }],
+      ["Activated", { deliveryDeadline: 1800000000, lockedArbCost: U("1.5") }],
+      ["DeliveryMarked", { seller: B, evidenceURI: "ipfs://x", inspectionDeadline: 1800003600 }],
+      ["DisputeRaised", { by: A, disputeID: 1n, evidenceURI: "" }],
+      ["Ruled", { disputeID: 1n, ruling: 0n }],
+      ["Settled", { finalState: 5, toBuyer: U("100.5"), toSeller: U("200.495"), toArbitrator: 0n, fee: U("1.005") }],
+      ["Settled", { finalState: 6, toBuyer: U("201"), toSeller: 0n, toArbitrator: 0n, fee: 0n }],
     ]) {
-      const m = watcher.describeEvent(name, args, deal, INFO);
-      if (m?.text) clean("describeEvent:" + name, m.text);
+      for (const m of watcher.describeEvent(name, args, deal, INFO)) {
+        clean(`describeEvent:${name}/${m.to}`, m.text);
+        checked++;
+      }
     }
+    assert.ok(checked >= 12, `只检查到 ${checked} 条 —— 测试又变成空转了`);
+  });
+
+  test("开单、只签授权、卡住、到期提醒", () => {
+    const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    const deal = {
+      address: A, buyer: A, seller: B, token: A,
+      price: U("100.5"), buyerBond: U("100.5"), sellerBond: U("100.5"),
+      state: 1, feeBps: 100, buyerFunded: true, sellerFunded: false,
+    };
+    for (const m of watcher.describeCreated(deal, INFO)) clean("created/" + m.to, m.text);
+    clean("approvedOnly", watcher.describeApprovedOnly(deal, "seller", INFO).text);
+    clean("stalled", watcher.describeStalled(deal, 25_000).text);
+    for (const k of ["delivery", "inspection"]) clean("deadline/" + k, watcher.describeDeadline(deal, k, 5400).text);
   });
 });
 
@@ -308,6 +335,41 @@ describe("待签交易消息", () => {
       const bad = unescapedReserved(cmds.renderTx(tx, 1, 2).text);
       assert.deepEqual(bad, [], bad.map((b) => `「${b.ch}」在 …${b.near}…`).join("；"));
     }
+  });
+
+  /*
+   * 多步只给一个按钮，签名页签完一步直接接下一步。
+   *
+   * 原来并排两个链接：用户签完第 1 步回到 Telegram，要自己找到第 2 条再点。
+   * 实测找不到，或者点回第 1 个把授权又签一遍。
+   */
+  const decode = (url) => JSON.parse(Buffer.from(url.split("#tx=")[1], "base64url").toString());
+
+  test("多步操作只有一个按钮，第 1 步里套着第 2 步", () => {
+    const { text, extra } = cmds.renderFlow(txs);
+    const btns = extra.reply_markup.inline_keyboard.flat();
+    assert.equal(btns.length, 1, "只能有一个按钮，两个按钮就又回到了「先点哪个」");
+
+    const step1 = decode(btns[0].url);
+    assert.equal(step1.to, txs[0].to);
+    assert.equal(step1.data, txs[0].data, "第 1 步必须是授权");
+    assert.deepEqual([step1.step, step1.of], [1, 2]);
+
+    const step2 = JSON.parse(Buffer.from(step1.next, "base64url").toString());
+    assert.equal(step2.data, txs[1].data, "第 2 步必须是入金");
+    assert.deepEqual([step2.step, step2.of], [2, 2]);
+    assert.equal(step2.next, undefined, "最后一步后面不能再有东西");
+
+    assert.match(text, /钱还在你自己钱包里/, "要说清楚只签第 1 步等于没入金");
+    assert.doesNotMatch(text, /calldata/, "主消息里不放给机器看的东西");
+    assert.deepEqual(unescapedReserved(text), []);
+  });
+
+  test("备用方式单独一条，两步的 calldata 都在", () => {
+    const fb = cmds.renderFlowFallback(txs);
+    for (const tx of txs) assert.match(fb, new RegExp(tx.data.slice(2, 14)));
+    assert.match(fb, /平时不用管/);
+    assert.deepEqual(unescapedReserved(fb), []);
   });
 });
 

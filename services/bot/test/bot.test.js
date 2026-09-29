@@ -325,7 +325,8 @@ describe("MarkdownV2 转义", () => {
 
 // ====================================================== 事件通知
 
-const { describeEvent, describeDeadline, dueBucket, stallBucket, describeStalled } =
+const { describeEvent, describeDeadline, dueBucket, stallBucket, describeStalled,
+  describeCreated, approvedOnly, describeApprovedOnly, progressLine, cnTime } =
   await import("../src/watcher.js");
 
 /// MarkdownV2 校验：正文里除了作为语法的 * 和 `，其余特殊字符都必须转义。
@@ -354,11 +355,17 @@ describe("事件通知", () => {
     seller: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
     buyerFunded: true, sellerFunded: true,
     deliveryDeadline: 2_000_000_000, inspectionDeadline: 2_000_100_000,
+    // 真实交易（loadDeal 的返回）一定有这几个字段；夹具缺了它们，
+    // 进度条和结算明细就测不到
+    state: 2, feeBps: 100,
+    price: 500_000_000n, buyerBond: 500_000_000n, sellerBond: 500_000_000n,
   };
   const info = { decimals: 6, symbol: "USDT", address: deal.buyer };
+  // 只有一方入金的时刻 —— Deposited 只在这时候说话，双方都入金时交给 Activated
+  const half = { ...deal, state: 1, buyerFunded: true, sellerFunded: false };
 
   const CASES = [
-    ["Deposited", { party: deal.buyer, amount: 2_000_000_000n }],
+    ["Deposited", { party: deal.buyer, amount: 2_000_000_000n }, half],
     ["Activated", { deliveryDeadline: 2_000_000_000n, lockedArbCost: 100_000_000n }],
     ["DeliveryMarked", { seller: deal.seller, evidenceURI: "ipfs://x", inspectionDeadline: 2_000_100_000n }],
     ["DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "ipfs://y" }],
@@ -367,9 +374,9 @@ describe("事件通知", () => {
     ["Settled", { finalState: 5n, toBuyer: 0n, toSeller: 2_995_000_000n, toArbitrator: 0n, fee: 5_000_000n }],
   ];
 
-  for (const [name, args] of CASES) {
+  for (const [name, args, d = deal] of CASES) {
     test(`${name} 生成的消息是合法 MarkdownV2`, () => {
-      const msgs = describeEvent(name, args, deal, info);
+      const msgs = describeEvent(name, args, d, info);
       assert.ok(msgs.length > 0, "应当产生至少一条通知");
       for (const m of msgs) assertValidMarkdownV2(m.text, `${name}/${m.to}`);
     });
@@ -384,15 +391,38 @@ describe("事件通知", () => {
     }
   });
 
-  test("通知只发给需要知道的那一方", () => {
-    // 卖家标记交付 → 只通知买家（要开始验收的是他）
+  /*
+   * 每个事件双方都要收到，而且各自的「你要做的」不一样。
+   *
+   * 这条测试原来断言的正好相反：「卖家标记交付 → 只通知买家」。
+   * 真实卖家的遭遇是：签完「标记已交付」回到 Telegram，什么都没有，
+   * 干瞪眼，不知道成了没有。没有消息不等于「你不用做什么」——
+   * 用户读到的是「是不是出错了」。
+   */
+  test("每个事件双方都收到，各自知道该干什么", () => {
     const dm = describeEvent("DeliveryMarked",
       { seller: deal.seller, evidenceURI: "", inspectionDeadline: 2_000_100_000n }, deal, info);
-    assert.deepEqual(dm.map((m) => m.to), ["buyer"]);
+    assert.deepEqual(dm.map((m) => m.to).sort(), ["buyer", "seller"]);
+    const seller = dm.find((m) => m.to === "seller").text;
+    const buyer = dm.find((m) => m.to === "buyer").text;
+    assert.match(seller, /你已标记交付/, "做了操作的人要收到回执");
+    assert.match(seller, /什么都不用做/, "不用做事也要明说，否则用户以为出错了");
+    assert.match(buyer, /确认收货/);
+    assert.match(buyer, /提起争议/);
 
-    // 买家提争议 → 只通知卖家
     const dr = describeEvent("DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "" }, deal, info);
-    assert.deepEqual(dr.map((m) => m.to), ["seller"]);
+    assert.deepEqual(dr.map((m) => m.to).sort(), ["buyer", "seller"]);
+    assert.match(dr.find((m) => m.to === "buyer").text, /你已提起争议/);
+    assert.match(dr.find((m) => m.to === "seller").text, /对方提起了争议/);
+  });
+
+  test("每条推送都有进度和「你要做的」", () => {
+    for (const [name, args, d = deal] of CASES) {
+      for (const m of describeEvent(name, args, d, info)) {
+        assert.match(m.text, /进度：/, `${name}/${m.to} 缺进度`);
+        assert.match(m.text, /你要做的/, `${name}/${m.to} 缺「你要做的」`);
+      }
+    }
   });
 
   /*
@@ -406,24 +436,25 @@ describe("事件通知", () => {
    * 他正是在这一刻开始干等的。
    */
   test("入金的人自己也收到回执", () => {
-    const dep = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, deal, info);
+    const dep = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, half, info);
     assert.deepEqual(dep.map((m) => m.to).sort(), ["buyer", "seller"]);
-    const mine = dep.find((m) => m.to === "buyer");
-    assert.match(mine.text, /已锁进托管合约/);
+    assert.match(dep.find((m) => m.to === "buyer").text, /你的钱已经存进去了/);
+    assert.match(dep.find((m) => m.to === "seller").text, /轮到你入金/);
   });
 
   test("对方还没入金时，回执要说清可以无损退出", () => {
-    const half = { ...deal, buyerFunded: true, sellerFunded: false };
     const mine = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, half, info)
       .find((m) => m.to === "buyer");
     assert.match(mine.text, /取消交易/);
     assert.match(mine.text, /原路退回/);
 
-    // 双方都入金了就不该再提退出 —— 那时候已经退不出去了，说了是误导
+    // 双方都入金了就不该再提退出 —— 那时候已经退不出去了，说了是误导。
+    // 这时 Deposited 干脆不说话，交给紧跟着的「交易生效」那条，免得同一秒来两条。
     const both = { ...deal, buyerFunded: true, sellerFunded: true };
-    const after = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, both, info)
-      .find((m) => m.to === "buyer");
-    assert.doesNotMatch(after.text, /取消交易/);
+    assert.deepEqual(describeEvent("Deposited", { party: deal.buyer, amount: 1n }, both, info), []);
+    for (const m of describeEvent("Activated", { deliveryDeadline: 2_000_000_000n }, both, info)) {
+      assert.doesNotMatch(m.text, /取消交易/);
+    }
   });
 
   /*
@@ -481,7 +512,7 @@ describe("事件通知", () => {
     const m = describeStalled(half, 7 * H);
     assert.equal(m.to, "buyer");          // 钱在谁那儿就提醒谁
     assert.match(m.text, /取消交易/);
-    assert.match(m.text, /原路取回/);
+    assert.match(m.text, /原路退回/);
     assertValidMarkdownV2(m.text, "stalled");
 
     // 卖家先入金时，提醒的是卖家
@@ -490,6 +521,64 @@ describe("事件通知", () => {
     // 都没入金（没人的钱在里面）和都入了（已经生效、退不出去了）都不该说话
     assert.equal(describeStalled({ ...deal, buyerFunded: false, sellerFunded: false }, 9 * D), null);
     assert.equal(describeStalled({ ...deal, buyerFunded: true, sellerFunded: true }, 9 * D), null);
+  });
+
+  test("进度条：走到哪一步一眼看得见", () => {
+    assert.equal(progressLine(1), "✅开单 → 👉入金 → ⬜交付 → ⬜验收 → ⬜放款");
+    assert.equal(progressLine(3), "✅开单 → ✅入金 → ✅交付 → 👉验收 → ⬜放款");
+    assert.equal(progressLine(5), "✅开单 → ✅入金 → ✅交付 → ✅验收 → ✅放款");
+    assert.match(progressLine(4), /争议中/);
+    assert.match(progressLine(6), /已取消/);
+  });
+
+  test("截止时间用北京时间，不用 UTC", () => {
+    // 2026-09-29 19:26 UTC = 北京时间 9月30日 03:26（跨了一天，最容易算错）
+    assert.equal(cnTime(Date.UTC(2026, 8, 29, 19, 26) / 1000), "北京时间 9月30日 03:26");
+    const m = describeEvent("Activated", { deliveryDeadline: 2_000_000_000n }, deal, info)
+      .find((x) => x.to === "seller");
+    assert.match(m.text, /北京时间/);
+    assert.doesNotMatch(m.text, /UTC/);
+  });
+
+  test("结算时把「收到的钱」拆开说清楚", () => {
+    // 真实用户看到的是「你收到 995」—— 货款才 500，第一反应是算错了。
+    // 实际是 货款 495 + 自己的押金退回 500。
+    const fee = 5_000_000n;
+    const toSeller = deal.price - fee + deal.sellerBond;
+    const msgs = describeEvent("Settled",
+      { finalState: 5n, toBuyer: deal.buyerBond, toSeller, toArbitrator: 0n, fee }, deal, info);
+    const s = msgs.find((m) => m.to === "seller").text;
+    assert.match(s, /你的押金退回/);
+    assert.match(s, /手续费/);
+    assert.match(msgs.find((m) => m.to === "buyer").text, /押金原路退回/);
+
+    // 仲裁分配拆不准，就只给总数，不猜
+    const odd = describeEvent("Settled",
+      { finalState: 5n, toBuyer: 1n, toSeller: 7n, toArbitrator: 0n, fee: 0n }, deal, info);
+    for (const m of odd) assert.doesNotMatch(m.text, /押金退回/);
+  });
+
+  test("开单通知按角色告诉各自要存多少", () => {
+    const [b, s] = describeCreated(deal, info);
+    assert.equal(b.to, "buyer");
+    assert.match(b.text, /1000\\.0 USDT/, "买家要存 货款 + 押金");
+    assert.match(s.text, /押金 500\\.0 USDT/);
+    assert.doesNotMatch(s.text, /货款/, "卖家不存货款，写上去会让他以为要付两份");
+  });
+
+  /*
+   * 入金要签两笔。第一笔「授权」不转账，但对不懂的人来说，钱包弹过窗、
+   * 签了字，就等于「付过了」—— 他会以为自己入金了，然后干等。
+   */
+  test("只签了授权没签入金，要被认出来", () => {
+    assert.equal(approvedOnly({ funded: false, allowance: 1000n, need: 1000n }), true);
+    assert.equal(approvedOnly({ funded: false, allowance: 0n, need: 1000n }), false, "什么都没签");
+    assert.equal(approvedOnly({ funded: true, allowance: 1000n, need: 1000n }), false, "已经入金了");
+    assert.equal(approvedOnly({ funded: false, allowance: 999n, need: 1000n }), false, "授权不够，入金也会失败");
+    const m = describeApprovedOnly({ ...deal, state: 1 }, "buyer", info);
+    assert.equal(m.to, "buyer");
+    assert.match(m.text, /还在你自己的钱包里/);
+    assert.match(m.text, /只需要签 1 步/);
   });
 
   test("到期提醒只发给「不作为会吃亏」的那一方", () => {
@@ -501,8 +590,8 @@ describe("事件通知", () => {
 
   test("验收期提醒必须说清「逾期会自动放款」", () => {
     const m = describeDeadline(deal, "inspection", 3600);
-    assert.match(m.text, /自动放给卖家/, "用户需要知道不作为的后果，否则提醒没有意义");
-    assert.match(m.text, /不可撤销/);
+    assert.match(m.text, /自动打给卖家/, "用户需要知道不作为的后果，否则提醒没有意义");
+    assert.match(m.text, /不能撤回/);
   });
 
   test("结算通知分别告知各方实收金额", () => {

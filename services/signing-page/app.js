@@ -210,11 +210,29 @@ function parseFragment() {
   if (!ethers.isAddress(json.to)) throw new Error("目标地址格式不合法");
   if (!/^0x[0-9a-fA-F]*$/.test(json.data)) throw new Error("calldata 格式不合法");
 
+  /*
+   * 多步操作（入金 = 授权 + 入金）把下一步整个塞在 next 里。
+   *
+   * 原来是 Telegram 里发两个链接。实测用户签完第 1 步回到 Telegram，
+   * 不知道还有第 2 步，或者点回了第 1 个。现在签完这一步，页面直接给
+   * 「继续第 2 步」—— 不用回去找。
+   *
+   * 安全上不引入新东西：下一步是一条完整的签名链接，打开之后照样跑
+   * 全部五项核验。伪造者想塞恶意交易进来，直接发那个链接就行，
+   * 用不着借 next。
+   */
+  const next = typeof json.next === "string" && /^[A-Za-z0-9_-]+$/.test(json.next) ? json.next : null;
+  const small = (v) => (Number.isInteger(v) && v >= 1 && v <= 9 ? v : null);
+  const step = small(json.step), of = small(json.of);
+
   return {
     to: ethers.getAddress(json.to),
     data: json.data,
     value: BigInt(json.value ?? 0),
     chainId: Number(json.chainId),
+    next,
+    step: step && of && step <= of ? step : null,
+    of: step && of && step <= of ? of : null,
   };
 }
 
@@ -410,6 +428,11 @@ function render() {
   $("main").hidden = false;
 
   $("action-title").textContent = action?.title ?? "无法识别的操作";
+  if (state.tx.step && state.tx.of) {
+    const b = $("step-banner");
+    b.textContent = `第 ${state.tx.step} 步，共 ${state.tx.of} 步`;
+    b.hidden = false;
+  }
   $("action-note").textContent = action?.note ?? "本页面无法解读这笔交易的含义。请勿签名。";
   $("action-card").className = "card " + riskClass(action?.risk ?? "high");
 
@@ -505,6 +528,49 @@ async function connect() {
   }
 }
 
+/*
+ * 签完之后告诉用户：成了没有、接下来去哪、会发生什么。
+ *
+ * 原来只有一句「可以回到 Telegram 继续了」。实测用户回到 Telegram，
+ * 那里什么都没有 —— 于是他对着屏幕干等，不知道成了没成。
+ * 现在把三件事说全：结果、下一步（要么继续签，要么回去等）、要等多久。
+ */
+function showOutcome(ok) {
+  const tx = state.tx;
+  const title = $("result-title");
+  const note = $("result-note");
+  const tg = window.ESCROW_CONFIG?.telegramBot;
+
+  if (!ok) {
+    title.textContent = "❌ 没有成功";
+    note.textContent = "这笔交易被链上拒绝了，你的钱没有动。回到 Telegram，发 /deals 看看这笔交易现在是什么状态。";
+    showBackToTelegram(tg);
+    return;
+  }
+
+  if (tx.next) {
+    const n = (tx.step ?? 1) + 1;
+    title.textContent = tx.of ? `✅ 第 ${tx.step} 步完成（共 ${tx.of} 步）` : "✅ 这一步完成了";
+    note.textContent = `还没结束！还差第 ${n} 步。点下面的按钮继续。`;
+    const a = $("next-step");
+    a.textContent = `继续第 ${n} 步 →`;
+    a.href = "#tx=" + tx.next;
+    a.hidden = false;
+    return;
+  }
+
+  title.textContent = tx.of ? `✅ 全部 ${tx.of} 步都完成了` : "✅ 成功了";
+  note.textContent = "现在回到 Telegram。机器人会在 1 分钟内发消息，告诉你这笔交易进行到哪了、下一步是什么。";
+  showBackToTelegram(tg);
+}
+
+function showBackToTelegram(bot) {
+  if (!bot || !/^[A-Za-z0-9_]{5,32}$/.test(bot)) return;
+  const a = $("back-tg");
+  a.href = `https://t.me/${bot}`;
+  a.hidden = false;
+}
+
 async function sign() {
   const btn = $("sign");
   btn.disabled = true;
@@ -528,10 +594,8 @@ async function sign() {
     btn.textContent = "等待上链确认…";
 
     const rc = await sent.wait();
-    btn.textContent = rc.status === 1 ? "✓ 已完成" : "交易失败";
-    $("result-note").textContent = rc.status === 1
-      ? "可以回到 Telegram 继续了。"
-      : "交易被链上拒绝。请回到 Telegram 重新查看交易状态。";
+    btn.hidden = true;
+    showOutcome(rc.status === 1);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "签名并发送";
@@ -695,6 +759,30 @@ async function main() {
     box.hidden = !box.hidden;
     $("toggle-raw").textContent = box.hidden ? "显示原始交易数据" : "隐藏原始交易数据";
   });
+
+  await autoConnect();
+}
+
+/*
+ * 钱包已经授权过本页面，就直接连上，不用再点一次「连接钱包」。
+ *
+ * 多步操作里，第 2 步是整页重载进来的（防止显示的和签的不一致），
+ * 连接状态随之清空。不自动连的话，用户签完第 1 步、点「继续第 2 步」，
+ * 看到的又是一个「连接钱包」—— 他会以为自己回到了起点。
+ *
+ * eth_accounts 不弹窗：钱包没授权过就返回空，什么也不做。
+ * 核验没全过的交易不自动连 —— 那种页面上连接按钮本来就是禁用的。
+ */
+async function autoConnect() {
+  if ($("connect").disabled) return;
+  const eth = injectedProvider();
+  if (!eth) return;
+  try {
+    const accounts = await eth.request({ method: "eth_accounts" });
+    if (Array.isArray(accounts) && accounts.length > 0) await connect();
+  } catch {
+    // 自动连接失败就留给用户手动点，不报错
+  }
 }
 
 /// 只改 URL 的 # 片段不会触发页面重载。

@@ -106,6 +106,11 @@ export async function tokenBalance(tokenAddr, owner, provider) {
   return new ethers.Contract(tokenAddr, ERC20_READ_ABI, provider).balanceOf(owner);
 }
 
+/// owner 允许 spender 划走多少。用来判断「授权签了、入金没签」。
+export async function tokenAllowance(tokenAddr, owner, spender, provider) {
+  return new ethers.Contract(tokenAddr, ERC20_READ_ABI, provider).allowance(owner, spender);
+}
+
 export async function listDeals(address, provider, limit = 10) {
   const f = factoryAt(provider);
   const n = Number(await f.dealsOfLength(address));

@@ -115,6 +115,14 @@
     font-size: 13px; font-weight: 500; padding: 10px;
   }
   #sign { background: var(--ok); }
+  /* 签完之后的下一步。做成和主按钮一样大 —— 这是整页最重要的一个动作 */
+  a.bigbtn {
+    display: block; padding: 14px; font-size: 16px; font-weight: 600; text-align: center;
+    border-radius: 10px; background: var(--accent); color: #fff; text-decoration: none;
+    margin: 0 0 12px;
+  }
+  #step-banner { font-size: 15px; font-weight: 600; text-align: center; margin: 0 0 10px; }
+  #result-title { font-size: 19px; color: var(--text); margin: 4px 0 0; }
 
   .connected { font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 10px; }
   .connected b { font-family: ui-monospace, Menlo, Consolas, monospace;
@@ -235,6 +243,8 @@
     在弄清楚原因之前，请不要用任何其它方式执行它。
   </div>
 
+  <p id="step-banner" hidden></p>
+
   <div id="action-card" class="card">
     <p id="action-title"></p>
     <p id="action-note"></p>
@@ -268,10 +278,12 @@
     <p id="status"></p>
 
     <div id="result" class="card" hidden style="margin-top:14px">
-      <h2>已提交</h2>
+      <h2 id="result-title">已发出，正在等链上确认…（通常几秒钟）</h2>
+      <p class="sub" id="result-note" style="margin:10px 0 14px;font-size:15px;color:var(--text)"></p>
+      <a id="next-step" class="bigbtn" hidden></a>
+      <a id="back-tg" class="bigbtn" hidden>回到 Telegram</a>
       <code id="txhash"></code>
       <a id="txlink" href="#" target="_blank" rel="noopener noreferrer" hidden>在区块浏览器查看</a>
-      <p class="sub" id="result-note" style="margin:10px 0 0"></p>
     </div>
   </div>
 

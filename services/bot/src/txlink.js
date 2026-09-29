@@ -78,12 +78,33 @@ export function buildTx(kind, to, method, args, label) {
 }
 
 /// 签名页链接。参数用 base64url 编码，避免在 URL 里出现需要转义的字符。
+const txPayload = (tx, meta = {}) => Buffer.from(
+  JSON.stringify({ to: tx.to, data: tx.data, value: tx.value, chainId: tx.chainId, ...meta })
+).toString("base64url");
+
 export function toSigningLink(tx) {
   if (!config.signingPageUrl) return null;
-  const payload = Buffer.from(
-    JSON.stringify({ to: tx.to, data: tx.data, value: tx.value, chainId: tx.chainId })
-  ).toString("base64url");
-  return `${config.signingPageUrl}#tx=${payload}`;
+  return `${config.signingPageUrl}#tx=${txPayload(tx)}`;
+}
+
+/**
+ * 多步操作只给一个链接：第 1 步里装着第 2 步，第 2 步里装着第 3 步……
+ *
+ * 原来是 Telegram 里并排发两个链接。实测的问题：签完第 1 步回到 Telegram，
+ * 不知道还有第 2 步；或者点回了第 1 个又签一遍授权。现在签名页签完一步，
+ * 直接出现「继续第 N 步」按钮，用户不用回 Telegram 找。
+ *
+ * 从最后一步往前套，这样每一层都知道自己是第几步、后面还有没有。
+ */
+export function toFlowLink(txs) {
+  if (!config.signingPageUrl || txs.length === 0) return null;
+  let next;
+  for (let i = txs.length - 1; i >= 0; i--) {
+    const meta = { step: i + 1, of: txs.length };
+    if (next) meta.next = next;
+    next = txPayload(txs[i], meta);
+  }
+  return `${config.signingPageUrl}#tx=${next}`;
 }
 
 /**

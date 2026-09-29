@@ -7,6 +7,11 @@
  * 在一个未经验证的合约上点确认。
  */
 window.ESCROW_CONFIG = {
+  // 签完之后「回到 Telegram」按钮指向的机器人（不带 @）。
+  // 必须写在这里而不是放进链接：链接是谁都能伪造的，一个伪造链接把用户
+  // 签完之后引到冒牌机器人那里，比伪造交易本身还容易得手。
+  telegramBot: "Renrendb_bot",
+
   chains: {
     97: {
       name: "BNB Smart Chain Testnet",

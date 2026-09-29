@@ -7,10 +7,10 @@ import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wa
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
   tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt, untilText, utcText,
-  tokenBalance,
+  tokenBalance, tokenAllowance,
 } from "./deals.js";
 import {
-  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toMessageLink, toEip681, buildFundDeal,
+  buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toFlowLink, toMessageLink, toEip681, buildFundDeal,
 } from "./txlink.js";
 import {
   dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
@@ -58,10 +58,10 @@ export function renderTx(tx, idx = null, total = null) {
     : esc("把下面的 calldata 粘进任何钱包发送即可。"));
   lines.push(
     "",
+    esc("—— 以下是签名页打不开时的备用方式，平时不用看 ——"),
     `合约: \`${esc(tx.to)}\``,
     `链 ID: ${esc(tx.chainId)}`,
-    "",
-    esc("calldata（签名页打不开时，可手工粘进任何钱包）:"),
+    esc("calldata（可手工粘进任何钱包发送）:"),
     `\`${esc(tx.data)}\``,
   );
 
@@ -70,14 +70,58 @@ export function renderTx(tx, idx = null, total = null) {
   return { text: lines.join("\n"), extra: rows.length ? keyboard(rows) : {} };
 }
 
+/// 多步操作里每一步的一句话说明。比 TX_NOTE 短 —— 这里是列清单，不是讲道理。
+const STEP_SHORT = {
+  approve: "授权 —— 不转账，只是允许合约下一步把钱划走",
+  depositBuyer: "入金 —— 真正把钱存进这笔交易的合约",
+  depositSeller: "入金 —— 真正把押金存进这笔交易的合约",
+  deposit: "存入额度",
+};
+
+/**
+ * 多步操作只发**一个按钮**。
+ *
+ * 原来是每一步一条消息、各带一个按钮，再补一句「必须按顺序完成」。实测：
+ * 签完第 1 步回到 Telegram，要自己找到第 2 条消息再点 —— 能找到的人不多。
+ * 现在一个按钮进去，签名页签完一步直接接下一步。
+ */
+export function renderFlow(txs) {
+  const title = txs.some((t) => /^deposit(Buyer|Seller)$/.test(t.method)) ? "入金"
+    : txs[txs.length - 1].label;
+  const lines = [
+    `*${esc(title)}：共 ${txs.length} 步*`,
+    "",
+    esc("点下面的按钮，在网页里用你的钱包签名。"),
+    ...txs.map((t, i) => esc(`第 ${i + 1} 步：${STEP_SHORT[t.method] ?? t.label}`)),
+    "",
+    esc(`签完第 1 步，网页会直接带你签下一步，不用回来找。`),
+    `*${esc(`⚠️ ${txs.length} 步都签完才算成功。只签第 1 步，钱还在你自己钱包里。`)}*`,
+  ];
+  const link = toFlowLink(txs);
+  const extra = link ? keyboard([[urlBtn(`✍️ 开始签名（共 ${txs.length} 步）`, link)]]) : {};
+  return { text: lines.join("\n"), extra };
+}
+
+/// 签名页打不开时的备用方式。单独一条，免得和主消息挤在一起吓到人。
+export function renderFlowFallback(txs) {
+  const lines = [esc("（这条是备用的：签名页打不开时，把下面的内容按顺序粘进任何钱包发送。平时不用管。）")];
+  txs.forEach((t, i) => {
+    lines.push("", `*${esc(`第 ${i + 1} 步 · ${t.label}`)}*`,
+      `合约: \`${esc(t.to)}\``, `calldata: \`${esc(t.data)}\``);
+  });
+  lines.push("", esc(`链 ID: ${txs[0].chainId}`));
+  return lines.join("\n");
+}
+
 export async function sendTxs(chatId, txs) {
-  for (let i = 0; i < txs.length; i++) {
-    const { text, extra } = renderTx(txs[i], i + 1, txs.length);
+  if (txs.length === 1) {
+    const { text, extra } = renderTx(txs[0]);
     await sendMessage(chatId, text, extra);
+    return;
   }
-  if (txs.length > 1) {
-    await sendMessage(chatId, esc("⚠️ 上面几步必须按顺序完成，先授权再入金。"));
-  }
+  const { text, extra } = renderFlow(txs);
+  await sendMessage(chatId, text, extra);
+  await sendMessage(chatId, renderFlowFallback(txs));
 }
 
 // ------------------------------------------------------------------ 基础命令
@@ -675,12 +719,21 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
         }
       }
 
-      await sendMessage(chatId,
-        `即将锁定 *${esc(fmtAmount(amount, info))}*\n\n` +
-        esc("需要两笔交易：先授权托管合约划转，再入金。"));
-      await sendTxs(chatId, buildDepositFlow({
-        token: deal.token, escrow: deal.address, amount, role,
-      }));
+      const flow = buildDepositFlow({ token: deal.token, escrow: deal.address, amount, role });
+
+      // 已经签过授权（上次停在半路）就不要再让他签一遍 —— 那只会让人更糊涂：
+      // 「我不是签过了吗？」
+      const allowance = await tokenAllowance(deal.token, u.address, deal.address, provider).catch(() => 0n);
+      if (allowance >= amount) {
+        await sendMessage(chatId,
+          `你要存入 *${esc(fmtAmount(amount, info))}*\n\n` +
+          esc("你之前已经签过「授权」了，这次只需要签 1 步。"));
+        await sendTxs(chatId, [flow[1]]);
+        return;
+      }
+
+      await sendMessage(chatId, `你要存入 *${esc(fmtAmount(amount, info))}*`);
+      await sendTxs(chatId, flow);
       return;
     }
     case "cancel":
