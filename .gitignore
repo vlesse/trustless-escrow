@@ -20,9 +20,14 @@ slither.txt
 .bot-state.json
 .keeper-state.json
 .proposer-state.json
-.sim-dispute.json
-.sim-jury-salts.json
 logs/
 services/*/.env
 services/*/.*-state.json
 deployments-localhost.json
+
+# 模拟场景的接力状态（含投票 salt）及其改名存档。只存在于跑模拟的那台机器上，
+# 由每日备份负责保存 —— 不能进仓库（salt 泄露就能提前知道票型）。
+.sim-*.json
+
+# 证据图片与证据包。用户数据，不进仓库；体积大，备份要单独做增量。
+evidence-store/
