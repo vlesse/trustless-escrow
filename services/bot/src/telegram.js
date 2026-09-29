@@ -75,8 +75,13 @@ export const btn = (text, data) => ({ text, callback_data: data });
 export const urlBtn = (text, url) => ({ text, url });
 
 /// 长轮询。返回一个异步迭代器，逐条吐出 update。
+/// 连续失败多少次就退出重启。5 秒一次，12 次约一分钟 ——
+/// 短暂网络抖动挺得过去，真正坏死的连接状态一分钟内就会被换掉。
+const MAX_CONSECUTIVE_FAILS = Number(process.env.MAX_POLL_FAILS ?? 12);
+
 export async function* updates() {
   let offset = 0;
+  let fails = 0;
   for (;;) {
     let batch;
     try {
@@ -90,10 +95,32 @@ export async function* updates() {
         allowed_updates: ["message", "callback_query", "my_chat_member"],
       });
     } catch (e) {
-      console.error("拉取更新失败，5 秒后重试:", e.message);
+      fails++;
+      console.error(`拉取更新失败（连续第 ${fails} 次），5 秒后重试:`, e.message);
+
+      /*
+       * 连续失败够多次就退出，让 systemd 重启一个全新进程。
+       *
+       * 原来是无限重试。实测机器人卡在这里连续失败 165 次、整整五天收不到
+       * 任何消息，而 systemd 一直显示 active —— 因为进程从来没死过，
+       * Restart=always 也就从来没机会生效。服务「活着」而产品是死的。
+       *
+       * 根因在进程内部：同一时刻新起一个 node 进程 fetch 立刻成功，
+       * 老进程却怎么也好不了（这台机器 IPv6 不通，undici 的连接池大概率
+       * 把连接钉死在了 v6 上）。这类状态只有换进程能清掉，重试多少次都没用。
+       *
+       * 退出不是放弃：退出才是唯一能自愈的动作。
+       */
+      if (fails >= MAX_CONSECUTIVE_FAILS) {
+        console.error(
+          `连续 ${fails} 次拉取失败，退出让 systemd 重启 —— ` +
+          "进程内的连接状态坏掉之后，重试多少次都不会好，换个进程才会。");
+        process.exit(1);
+      }
       await new Promise((r) => setTimeout(r, 5000));
       continue;
     }
+    fails = 0;
     for (const u of batch) {
       offset = u.update_id + 1;
       yield u;
