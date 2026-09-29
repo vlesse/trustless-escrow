@@ -67,8 +67,12 @@ async function onMessage(msg) {
   }
 
   if (r.action === "flow") {
-    log(`user=${userId} flow-input`);
-    return cmd.handleFlowInput(chatId, userId, text);
+    // 发的是图片/文件时，text 是空的。必须把这件事告诉流程 ——
+    // 否则提交证据那一步会把空字符串当成「不附证据」放行。
+    const hasMedia = Boolean(msg.photo || msg.document || msg.video || msg.voice ||
+      msg.audio || msg.sticker || msg.animation || msg.video_note);
+    log(`user=${userId} flow-input${hasMedia ? " (media)" : ""}`);
+    return cmd.handleFlowInput(chatId, userId, text, { hasMedia });
   }
 
   if (r.action === "hint") {

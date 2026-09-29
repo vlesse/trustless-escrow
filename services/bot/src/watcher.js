@@ -5,6 +5,7 @@ import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAl
 import * as juryalert from "./juryalert.js";
 import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
+import { describeEvidence } from "./evidence.js";
 
 /// 链上事件推送。
 ///
@@ -27,6 +28,9 @@ const ESCROW_EVENTS = [
   "event Activated(uint64 deliveryDeadline, uint256 lockedArbCost)",
   "event DeliveryMarked(address indexed seller, string evidenceURI, uint64 inspectionDeadline)",
   "event DisputeRaised(address indexed by, uint256 indexed disputeID, string evidenceURI)",
+  // 原来漏了这一个。用户提交证据、签完，机器人一声不吭 —— 实测他以为没成功，
+  // 又交了一遍，链上于是有了两份一样的证据、多付一次 gas。
+  "event Evidence(address indexed by, string evidenceURI)",
   "event Ruled(uint256 indexed disputeID, uint256 ruling)",
   "event Settled(uint8 finalState, uint256 toBuyer, uint256 toSeller, uint256 toArbitrator, uint256 fee)",
 ];
@@ -151,6 +155,23 @@ export function card({ icon, title, deal, lines = [], youDo, notes = [] }) {
   ].join("\n");
 }
 
+/**
+ * 把证据内容摆出来给人看。
+ *
+ * 文字证据是 data: 格式存在链上的，原样显示是一长串 base64，等于没显示。
+ * 解码成原文；链接照原样放在代码块里（不做成可点的链接 —— 内容是对方写的，
+ * 可能是钓鱼网址）。太长就截断，全文在区块浏览器里。
+ */
+const EVIDENCE_SHOW_MAX = 300;
+export function evidenceLines(uri, label, fromOther = false) {
+  const e = describeEvidence(uri);
+  if (e.kind === "none") return [esc(`${label}：（没有附）`)];
+  const cut = (t) => ([...t].length > EVIDENCE_SHOW_MAX ? [...t].slice(0, EVIDENCE_SHOW_MAX).join("") + "……" : t);
+  if (e.kind === "text") return [esc(`${label}：「${cut(e.body)}」`)];
+  const warn = fromOther ? "，是对方给的，打开前确认是正常网址" : "";
+  return [esc(`${label}（链接${warn}）：`), `\`${esc(cut(e.body))}\``];
+}
+
 /// 结算明细。只在能确定拆分方式的时候拆（正常成交）—— 仲裁的分法
 /// 很多，猜错一个数比不拆更糟。
 function settleBreakdown(role, args, deal, info) {
@@ -222,6 +243,7 @@ export function describeEvent(name, args, deal, info) {
         icon: "📦",
         title: r === "seller" ? "你已标记交付" : "卖家说已经交付了",
         deal,
+        lines: evidenceLines(args.evidenceURI, r === "seller" ? "你附的交付凭证" : "卖家附的交付凭证", r !== "seller"),
         youDo: r === "seller"
           ? "等买家验收。现在什么都不用做。"
           : "去检查你收到的东西。\n· 没问题 → 点「确认收货」，钱打给卖家\n· 有问题 → 点「提起争议」",
@@ -238,11 +260,26 @@ export function describeEvent(name, args, deal, info) {
         icon: "⚖️",
         title: r === raiser ? "你已提起争议" : "对方提起了争议",
         deal,
-        youDo: "把能证明你说法的材料交上去：点下面的「提交证据」。聊天截图、付款记录、物流信息都算。",
+        lines: evidenceLines(args.evidenceURI, r === raiser ? "你附的理由" : "对方附的理由", r !== raiser),
+        youDo: "点下面的「提交证据」，用文字写清楚发生了什么：什么时间、对方说了什么、付款和物流记录。也可以发链接。",
         notes: [
           esc("仲裁只看双方交上去的材料。你不交，就只能按对方的材料判。"),
           esc("钱会一直锁在合约里，直到出结果。这期间谁都动不了，包括平台。"),
         ],
+      }));
+    }
+
+    case "Evidence": {
+      const by = args.by.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
+      return both((r) => card({
+        icon: r === by ? "✅" : "📎",
+        title: r === by ? "你的证据已提交" : "对方提交了新证据",
+        deal,
+        lines: evidenceLines(args.evidenceURI, r === by ? "你提交的内容" : "对方提交的内容", r !== by),
+        youDo: r === by
+          ? "等仲裁结果。还有要补充的，随时可以再点「提交证据」。"
+          : "看看对方说的对不对。有反驳的材料，点下面的「提交证据」交上去。",
+        notes: [esc("证据已经永久记在链上，谁都不能删除或修改。")],
       }));
     }
 

@@ -19,6 +19,7 @@ import {
 import * as gate from "./groupgate.js";
 import * as quota from "./quota.js";
 import * as quotacmd from "./quotacommands.js";
+import { parseEvidenceInput, describeEvidence, REJECT_TEXT, EVIDENCE_HOWTO } from "./evidence.js";
 
 const provider = makeProvider();
 
@@ -754,10 +755,12 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
       await sendMessage(chatId, [
         "*标记已交付 · 第 1 步，共 2 步*",
         "",
-        esc("可以附一个交付凭证的链接（发货截图、物流单号页、网盘链接都行）。"),
+        esc("可以附一个交付凭证，比如：快递单号、发货时间、你是怎么把东西交给买家的。"),
         esc("它只在将来闹争议时有用：仲裁方看的就是这个。现在不填，将来也补不上。"),
         "",
-        esc("直接把链接粘过来（https:// 或 ipfs:// 开头），或者点下面的按钮跳过。"),
+        esc(EVIDENCE_HOWTO),
+        "",
+        esc("没有凭证就点下面的按钮。"),
       ].join("\n"), evidenceSkipKeyboard("markDelivered", deal.address, "没有凭证，直接标记已交付"));
       return;
     case "dispute":
@@ -767,12 +770,21 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
         esc("· 争议由仲裁层裁决，败诉方的保证金会被罚没给对方"),
         esc("· 恶意申诉同样会被罚没，这不是一个免费的选项"),
         "",
-        esc("请把证据链接粘过来（https:// 或 ipfs:// 开头），或者点下面的按钮不附证据。"),
+        "*现在把你的理由和证据发给我：*",
+        esc(EVIDENCE_HOWTO),
+        "",
+        esc("暂时不想写，就点下面的按钮。之后随时可以用「提交证据」补充。"),
       ].join("\n"), evidenceSkipKeyboard("raiseDispute", deal.address, "不附证据，直接提起争议"));
       return;
     case "evidence":
       session.setFlow(userId, "evidence", { deal: deal.address, method: "submitEvidence" });
-      await sendMessage(chatId, esc("请提供证据链接（https:// 或 ipfs:// 开头）。"));
+      await sendMessage(chatId, [
+        "*提交证据*",
+        "",
+        esc(EVIDENCE_HOWTO),
+        "",
+        esc("可以提交多次，每次一条。"),
+      ].join("\n"));
       return;
     default:
       await sendMessage(chatId, esc("未知操作"));
@@ -815,30 +827,41 @@ async function submitEvidence(chatId, userId, deal, method, uri) {
   session.clearFlow(userId);
 }
 
-async function handleEvidenceInput(chatId, userId, text) {
+async function handleEvidenceInput(chatId, userId, text, { hasMedia = false } = {}) {
   const u = session.user(userId);
   const { deal, method } = u.draft;
-  const v = text.trim();
-  const uri = v.toLowerCase() === "skip" ? "" : v;
+  // 「提交证据」本身就是为了交东西，跳过没有意义；另外两步有跳过按钮
+  const allowSkip = method !== "submitEvidence";
+  const r = parseEvidenceInput(text, { hasMedia, allowSkip });
 
-  if (uri && !/^(ipfs|https?):\/\//i.test(uri)) {
-    await sendMessage(chatId,
-      esc("这不像一个链接。请粘贴 https:// 或 ipfs:// 开头的地址，或者点上面那条消息里的按钮跳过。"),
-      evidenceSkipKeyboard(method, deal, `不填凭证，直接${EVIDENCE_LABELS[method]}`));
+  if (!r.ok) {
+    await sendMessage(chatId, esc(REJECT_TEXT[r.reason]),
+      allowSkip ? evidenceSkipKeyboard(method, deal, `不附证据，直接${EVIDENCE_LABELS[method]}`) : {});
     return;
   }
 
-  await submitEvidence(chatId, userId, deal, method, uri);
+  // 文字证据先给他看一眼会写进去什么 —— 永久公开，写错了改不了
+  if (r.kind === "text") {
+    await sendMessage(chatId, [
+      "*下面这段文字会永久写进链上：*",
+      "",
+      esc(describeEvidence(r.uri).body),
+      "",
+      esc(`没问题就点下面的签名按钮。要改的话，别签，重新点一次「${EVIDENCE_LABELS[method]}」再发。`),
+    ].join("\n"));
+  }
+
+  await submitEvidence(chatId, userId, deal, method, r.uri);
 }
 
 // ------------------------------------------------------------------ 流程分发
 
-export async function handleFlowInput(chatId, userId, text) {
+export async function handleFlowInput(chatId, userId, text, opts = {}) {
   const u = session.user(userId);
   switch (u.flow) {
     case "bind": return handleBindSignature(chatId, userId, text);
     case "new": return handleNewInput(chatId, userId, text);
-    case "evidence": return handleEvidenceInput(chatId, userId, text);
+    case "evidence": return handleEvidenceInput(chatId, userId, text, opts);
     default: return false;
   }
 }

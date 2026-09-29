@@ -369,6 +369,8 @@ describe("事件通知", () => {
     ["Activated", { deliveryDeadline: 2_000_000_000n, lockedArbCost: 100_000_000n }],
     ["DeliveryMarked", { seller: deal.seller, evidenceURI: "ipfs://x", inspectionDeadline: 2_000_100_000n }],
     ["DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "ipfs://y" }],
+    ["Evidence", { by: deal.buyer, evidenceURI: "data:text/plain;charset=utf-8;base64," +
+      Buffer.from("激活码提示已被使用 (截图时间 22:10)", "utf8").toString("base64") }],
     ["Ruled", { disputeID: 1n, ruling: 0n }],
     ["Ruled", { disputeID: 1n, ruling: 1n }],
     ["Settled", { finalState: 5n, toBuyer: 0n, toSeller: 2_995_000_000n, toArbitrator: 0n, fee: 5_000_000n }],
@@ -414,6 +416,30 @@ describe("事件通知", () => {
     assert.deepEqual(dr.map((m) => m.to).sort(), ["buyer", "seller"]);
     assert.match(dr.find((m) => m.to === "buyer").text, /你已提起争议/);
     assert.match(dr.find((m) => m.to === "seller").text, /对方提起了争议/);
+  });
+
+  /*
+   * 提交证据原来没有任何回执：Evidence 事件根本不在监听列表里。
+   * 真实用户签完没反应，又交了一遍 —— 链上两份一样的证据，多付一次 gas。
+   */
+  test("提交证据后双方都收到，而且看得到内容", () => {
+    const say = "激活码提示已被使用";
+    const uri = "data:text/plain;charset=utf-8;base64," + Buffer.from(say, "utf8").toString("base64");
+    const msgs = describeEvent("Evidence", { by: deal.buyer, evidenceURI: uri }, deal, info);
+    assert.deepEqual(msgs.map((m) => m.to).sort(), ["buyer", "seller"]);
+    const mine = msgs.find((m) => m.to === "buyer").text;
+    const theirs = msgs.find((m) => m.to === "seller").text;
+    assert.match(mine, /你的证据已提交/);
+    assert.match(theirs, /对方提交了新证据/);
+    // 文字证据要解码成原文，不是一串 base64
+    assert.ok(mine.includes(say) && theirs.includes(say));
+    assert.doesNotMatch(mine, /base64/);
+  });
+
+  test("对方给的链接要提醒小心，自己的不用", () => {
+    const msgs = describeEvent("Evidence", { by: deal.seller, evidenceURI: "https://evil.example/x" }, deal, info);
+    assert.match(msgs.find((m) => m.to === "buyer").text, /打开前确认/);
+    assert.doesNotMatch(msgs.find((m) => m.to === "seller").text, /打开前确认/);
   });
 
   test("每条推送都有进度和「你要做的」", () => {
