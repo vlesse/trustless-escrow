@@ -62,6 +62,8 @@ async function main() {
   row("stakePerVote", f18(await jury.stakePerVote()));
   row("costOf", f18(await jury.costOf(D.settlementToken)));
   row("admin", await jury.admin(), D.deployer);
+  row("factory", await jury.factory(), D.escrowFactory);
+  row("upstream", await jury.upstream(), D.optimisticArbitrator);
 
   // 乐观层必须付得起陪审团 —— 付不起的话争议升级会在受理那一步直接 revert，
   // 而那时候钱已经锁在托管合约里了。

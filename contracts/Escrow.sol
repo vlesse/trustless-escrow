@@ -154,8 +154,10 @@ contract Escrow is IEscrowArbitrable {
     error NotParty();
     error NotArbitrator();
     error TooEarly();
+    error TooLate();
     error FeeTooHigh();
     error BondBelowArbitrationCost();
+    error ArbitrationUnconfigured();
     error ZeroAddress();
     error Reentrancy();
     error AlreadyFunded();
@@ -249,6 +251,11 @@ contract Escrow is IEscrowArbitrable {
         // 双方保证金都必须能覆盖仲裁成本，否则败诉方无力承担裁决费用，
         // 结算数学会下溢。这个校验放在此处（而非 initialize），
         // 是因为它必须与「成本快照」在同一时刻发生。
+        //
+        // cost == 0 不能当成「免费仲裁」。乐观层 / 陪审团在 costOf[token]==0
+        // 时会拒绝 createDispute，那时交易已经锁在 Funded/Delivered，
+        // 买家既提不了争议，45 天兜底也永远不会开火，只剩把货款给卖家。
+        if (cost == 0) revert ArbitrationUnconfigured();
         if (buyerBond < cost || sellerBond < cost) revert BondBelowArbitrationCost();
 
         lockedArbCost = cost;
@@ -274,6 +281,11 @@ contract Escrow is IEscrowArbitrable {
     function markDelivered(string calldata evidenceURI) external {
         if (state != State.Funded) revert BadState();
         if (msg.sender != seller) revert NotParty();
+        // 交付期过后只能走 raiseDispute 对抗 claimNonDelivery。
+        // 若此处仍放行，恶意卖家可以盯着买家的退款交易抢先标记，
+        // 把「无过错全额退款」改成强制争议，甚至在 inspectionWindow==0
+        // 时同一区块内直接 settleAfterInspection 放款。
+        if (block.timestamp >= deliveryDeadline) revert TooLate();
         state = State.Delivered;
         inspectionDeadline = uint64(block.timestamp) + inspectionWindow;
         emit DeliveryMarked(msg.sender, evidenceURI, inspectionDeadline);

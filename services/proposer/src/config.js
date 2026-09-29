@@ -63,6 +63,11 @@ export const config = {
 
   /// 已处理案件的状态文件，防止重启后重复提案。
   stateFile: process.env.STATE_FILE ?? "./.proposer-state.json",
+
+  /// 扫证据日志时往回追多少块。公共 BSC 节点大约只留 5 万块。
+  lookbackBlocks: num("LOOKBACK_BLOCKS", 45_000),
+  /// 单次 eth_getLogs 的最大跨度。BSC 上限 50000，取得更保守以免换 RPC 就炸。
+  logRangeMax: num("LOG_RANGE_MAX", 20_000),
 };
 
 export function describeConfig() {

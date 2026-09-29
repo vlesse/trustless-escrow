@@ -13,7 +13,9 @@ import {
 } from "./txlink.js";
 import {
   dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
+  bondVerdict, renderBondRejection,
 } from "./arbitration.js";
+import * as gate from "./groupgate.js";
 import * as quota from "./quota.js";
 import * as quotacmd from "./quotacommands.js";
 
@@ -79,23 +81,83 @@ export async function sendTxs(chatId, txs) {
 
 // ------------------------------------------------------------------ 基础命令
 
-export async function cmdStart(chatId) {
+export async function cmdStart(chatId, userId, from = null) {
+  if (userId) await gate.liftOnPrivateStart(userId, from || { id: userId, first_name: "你" });
+  for (const block of renderStartGuide()) {
+    await sendMessage(chatId, block);
+  }
+}
+
+export function renderStartGuide() {
+  const site = config.siteUrl;
+  return [
+    [
+      "*人人担保*",
+      "",
+      esc("非托管的点对点担保交易。资金锁在每笔交易独立的智能合约里，运营方拿不走。"),
+      "",
+      "*这个机器人不持有你的任何东西*",
+      esc("· 它永远不会索取私钥或助记词"),
+      esc("· 所有操作都由你在自己的钱包里签名"),
+      esc("· 即使它被关停，你仍可用任意钱包直接和合约交互把钱取回"),
+      "",
+      "*现在是测试网*",
+      esc("BNB Smart Chain Testnet（chainId 97）。结算币是我们发的假 USDT，不是主网真 U。不要充真实资金。"),
+      site ? `公示站：${esc(site)}` : "",
+    ].filter(Boolean).join("\n"),
+
+    [
+      "*用哪种钱包*",
+      "",
+      esc("必须是「自托管钱包」：你自己拿着钥匙，能签任意消息、能给任意合约发交易。"),
+      "",
+      esc("可以用："),
+      esc("· MetaMask（小狐狸）电脑插件或手机 App"),
+      esc("· OKX Web3 钱包（欧易 App 里的「Web3 钱包」页，不是交易账户）"),
+      esc("· TokenPocket、imToken、Bitget Wallet，以及支持 WalletConnect 的钱包"),
+      "",
+      esc("怎么操作："),
+      esc("1. 把网络切到 BNB Smart Chain 测试网"),
+      esc("2. 钱包里留一点 tBNB 付 gas（测试网水龙头即可）"),
+      esc("3. 点我发的签名链接。手机请用钱包 App 的内置浏览器打开；电脑用装了小狐狸的 Chrome"),
+      esc("4. 先 /bind 绑定地址（只签名，不转账、不花 gas），再 /new 开单"),
+      "",
+      "*如果钱在欧意 / 币安 / 其它交易所*",
+      esc("交易所账户不能给合约签名，也不能绑定。请先把币提到上面任意一个自托管钱包，再用那个钱包来绑。"),
+      esc("不要把交易所充值地址拿来 /bind —— 你签不了字，钱也提不出来。"),
+      "",
+      "*签名页打不开时*",
+      esc("每条操作消息里都有原始 to 和 calldata，可以贴进任意钱包的「自定义交易」。机器人挂了，钱还在合约里。"),
+      "",
+      "开始：",
+      esc("/bind  绑定钱包"),
+      esc("/new   发起担保交易"),
+      esc("/deals 我的交易"),
+      esc("/help  命令与规则"),
+    ].join("\n"),
+  ];
+}
+
+/// 群里被点名、或有人刚进群。闲聊仍然不理，但这句必须有：
+/// 陌生人进群喊一声，机器人完全没反应，看起来就是坏了。
+export async function cmdGroupIntro(chatId, botUsername) {
+  const deep = botUsername ? `https://t.me/${botUsername}?start=1` : "";
+  const site = config.siteUrl;
+  const rows = [];
+  if (deep) rows.push([urlBtn("👉 私聊我，开始绑定 / 开单", deep)]);
+  if (site) rows.push([urlBtn("查看公示站", site)]);
+
   await sendMessage(chatId, [
     "*人人担保*",
     "",
-    esc("非托管的点对点担保交易。资金锁在每笔交易独立的智能合约里。"),
+    esc("钱锁在链上合约里，运营方拿不走。开单、绑定钱包、看自己的交易，请点下面私聊我。"),
+    esc("群里做这些等于公开你的地址。"),
     "",
-    "*这个机器人不持有你的任何东西*",
-    esc("· 它永远不会索取私钥或助记词"),
-    esc("· 它没有能力动用你的资金——所有交易都由你在自己的钱包里签名"),
-    esc("· 即使它被关停或封禁，你的资金仍可通过任何钱包直接与合约交互取回"),
-    "",
-    "开始使用：",
-    esc("/bind  绑定你的钱包地址（只需要地址，不需要私钥）"),
-    esc("/new   发起一笔担保交易"),
-    esc("/deals 查看我的交易"),
-    esc("/help  完整说明"),
-  ].join("\n"));
+    esc("群里可以直接用："),
+    esc("/deal <合约地址>  当面核对一笔交易"),
+    esc("/rep <地址>       看公开信誉"),
+    esc("/help             完整说明"),
+  ].join("\n"), rows.length ? keyboard(rows) : {});
 }
 
 export async function cmdHelp(chatId) {
@@ -114,10 +176,11 @@ export async function cmdHelp(chatId) {
     esc("买家锁入「货款 + 保证金」，卖家锁入「保证金」。"),
     esc("正常成交：货款给卖家，双方保证金各自退回。"),
     esc("争议：由仲裁层裁决，违约方的保证金罚没给对方。"),
+    esc("卖家逾期未标记交付：货款和买家保证金原路退回，卖家保证金也原额退还（无过错取消，不罚没）。"),
     "",
     "*为什么要交保证金*",
     esc("没有罚没，作恶的成本就是零，骗子可以无限次尝试。"),
-    esc("买卖双方对称：卖家不发货罚没，买家谎称没收到同样罚没。"),
+    esc("买卖双方对称：只有争议有胜负时才罚没。单纯不发货走退款，不罚保证金。"),
     "",
     "*条款很重要*",
     esc("发起交易时填写的条款原文，其哈希会写上链。争议时只有哈希对得上的那份"),
@@ -125,7 +188,7 @@ export async function cmdHelp(chatId) {
     "",
     "*关于信誉*",
     esc("信誉只在「对方保证金低于货款」时才需要。保证金不低于货款时，"),
-    esc("骗你这一笔的罚没大于收益 —— 那时你不需要相信任何人。"),
+    esc("争议路径上骗你这一笔的罚没大于收益。逾期不标记交付不罚没，那条路只退款。"),
     esc("身份押金不是罚金，没有任何人能罚没它。它买的是年龄：钱能瞬间凑齐，年龄不能。"),
     "",
     "*商家额度是什么*",
@@ -229,7 +292,7 @@ async function handleBindSignature(chatId, userId, text) {
 const NEW_STEPS = [
   { key: "role", prompt: "你在这笔交易里是**买家**还是**卖家**？", buttons: [[btn("我是买家", "new:role:buyer"), btn("我是卖家", "new:role:seller")]] },
   { key: "counterparty", prompt: "对方的钱包地址？" },
-  { key: "token", prompt: "结算币种的合约地址？（USDT / USDC 的合约地址）" },
+  { key: "token", prompt: "结算币种的合约地址？\n\n测试网请填公示站上的假 USDT，不要填主网地址。" },
   { key: "price", prompt: "货款金额？（按代币单位填，例如 `1000` 表示 1000 USDT）" },
   { key: "bond", prompt: "保证金金额？双方各出这么多。\n\n建议与货款等额——保证金越低，作恶成本越低。直接发 `same` 表示与货款相同。" },
   { key: "deliveryHours", prompt: "交付期限？（小时，例如 `72`）" },
@@ -237,25 +300,33 @@ const NEW_STEPS = [
   { key: "terms", prompt: "交易条款原文。写清楚：商品是什么、怎样算交付完成、怎样算验收通过。\n\n争议时仲裁方就看这段文字。写得越具体，越不容易扯皮。" },
 ];
 
+function newSteps() {
+  if (config.settlementToken) return NEW_STEPS.filter((s) => s.key !== "token");
+  return NEW_STEPS;
+}
+
 export async function cmdNew(chatId, userId) {
   const u = session.user(userId);
   if (!u.address) {
     await sendMessage(chatId, esc("请先 /bind 绑定钱包。"));
     return;
   }
-  session.setFlow(userId, "new", { step: 0 });
+  const draft = { step: 0 };
+  if (config.settlementToken) draft.token = config.settlementToken;
+  session.setFlow(userId, "new", draft);
   await promptStep(chatId, userId);
 }
 
 async function promptStep(chatId, userId) {
   const u = session.user(userId);
-  const step = NEW_STEPS[u.draft.step];
+  const steps = newSteps();
+  const step = steps[u.draft.step];
   if (!step) return finalizeNew(chatId, userId);
 
   const n = u.draft.step + 1;
   await sendMessage(
     chatId,
-    `*${n}/${NEW_STEPS.length}*\n\n${esc(step.prompt).replace(/\\\*\\\*(.+?)\\\*\\\*/g, "*$1*").replace(/\\`(.+?)\\`/g, "`$1`")}`,
+    `*${n}/${steps.length}*\n\n${esc(step.prompt).replace(/\\\*\\\*(.+?)\\\*\\\*/g, "*$1*").replace(/\\`(.+?)\\`/g, "`$1`")}`,
     step.buttons ? keyboard(step.buttons) : {}
   );
 }
@@ -306,7 +377,7 @@ export function validateStep(key, raw, draft) {
 
 async function handleNewInput(chatId, userId, text) {
   const u = session.user(userId);
-  const step = NEW_STEPS[u.draft.step];
+  const step = newSteps()[u.draft.step];
   if (!step) return;
 
   const err = validateStep(step.key, text, u.draft);
@@ -338,6 +409,12 @@ async function finalizeNew(chatId, userId) {
   const cap = capVerdict({ value, cap: arb.cap });
   if (!cap.ok) {
     await sendMessage(chatId, renderCapRejection({ value, cap: arb.cap, info }).join("\n"));
+    session.clearFlow(userId);
+    return;
+  }
+  const bonds = bondVerdict({ bond, cost: arb.cost });
+  if (!bonds.ok) {
+    await sendMessage(chatId, renderBondRejection({ bond, cost: arb.cost, info }).join("\n"));
     session.clearFlow(userId);
     return;
   }

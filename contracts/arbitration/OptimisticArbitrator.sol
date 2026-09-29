@@ -252,7 +252,10 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
         d.token.safeTransfer(proposer, d.bond);
         emit BondSettled(id, proposer, d.bond);
 
-        IEscrowArbitrable(d.arbitrable).rule(id, ruling);
+        // 托管可能已经走了 resolveStaleDispute，rule 会 revert。
+        // 保证金结算不能绑在那一次回调上，否则提案人的钱永久锁死，
+        // 而陪审团那边已经用 try/catch 把自己的质押解开了。
+        try IEscrowArbitrable(d.arbitrable).rule(id, ruling) {} catch {}
         emit Executed(id, ruling, false);
     }
 
@@ -287,9 +290,10 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
 
         d.status = Status.Executed;
 
-        // 顺序不能颠倒：先让托管合约结算，这一步会把本层的仲裁服务费转入本合约，
-        // 终局仲裁方的报酬正是从这笔服务费里支付。
-        IEscrowArbitrable(d.arbitrable).rule(id, ruling);
+        // 托管可能已经走了失联拆分。回调失败时仍然结算挑战保证金，
+        // 否则提案人/挑战者的质押会跟陪审员的本金不同命：陪审团 catch 了，
+        // 本层整笔 revert，案件停在 Escalated，lockedBonds 再也扫不出来。
+        try IEscrowArbitrable(d.arbitrable).rule(id, ruling) {} catch {}
 
         // 结算挑战保证金：终局裁决与 AI 提案不一致 → 挑战者赢；一致 → 提案人赢。
         // 双份保证金全额归胜方，不再被终局仲裁成本侵蚀 ——
@@ -316,6 +320,9 @@ contract OptimisticArbitrator is IEscrowArbitrator, IEscrowArbitrable {
     // -------------------------------------------------------------- 配置
 
     function setCost(address token, uint256 cost, uint256 bond) external onlyAdmin {
+        // 配成 0 等于关掉该币种的争议入口。已锁定的交易 raiseDispute 会 revert，
+        // 45 天兜底也进不去。要停新单，去工厂调 maxDealValue，不要从这里拆掉仲裁。
+        if (cost == 0) revert CostNotConfigured();
         costOf[token] = cost;
         bondOf[token] = bond;
     }

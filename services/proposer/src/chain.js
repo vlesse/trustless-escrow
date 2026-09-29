@@ -13,6 +13,7 @@ const ARBITRATOR_ABI = [
   // ABI 编码与逐个返回完全一致。但哪天结构体里加一个 string，编码就分叉，
   // 而且是静默地解出错误的值。不靠这种巧合。
   "function disputes(uint256) view returns (tuple(address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value, address dealBuyer, address dealSeller) d)",
+  "function nextDisputeID() view returns (uint256)",
   "function propose(uint256 id, uint8 ruling)",
   "function bondOf(address token) view returns (uint256)",
   "function proposer() view returns (address)",
@@ -45,6 +46,24 @@ const ERC20_ABI = [
 /// 乐观层的 Status 枚举
 export const Status = { None: 0, Open: 1, Proposed: 2, Escalated: 3, Executed: 4 };
 
+/// ethers v6 对单返回值直接给那个值，不会再包一层 `{ d: tuple }`。
+/// 写成 `(await disputes(id)).d` 拿到的是 undefined，连上真链才炸。
+export function unwrapDispute(raw) {
+  if (raw && raw.arbitrable != null) return raw;
+  if (raw && raw.d) return raw.d;
+  return raw;
+}
+
+async function getLogsChunked(provider, filter, fromBlock, toBlock, maxRange) {
+  const out = [];
+  const span = Math.max(1, maxRange);
+  for (let a = fromBlock; a <= toBlock; a += span) {
+    const b = Math.min(a + span - 1, toBlock);
+    out.push(...await provider.getLogs({ ...filter, fromBlock: a, toBlock: b }));
+  }
+  return out;
+}
+
 export function makeClients() {
   const provider = new ethers.JsonRpcProvider(config.rpcUrl);
   const wallet = new ethers.Wallet(config.privateKey, provider);
@@ -54,7 +73,7 @@ export function makeClients() {
 
 /// 汇总一个争议所需的全部链上事实与证据。
 export async function loadCase(id, { provider, arbitrator }) {
-  const d = (await arbitrator.disputes(id)).d;
+  const d = unwrapDispute(await arbitrator.disputes(id));
   if (d.status !== BigInt(Status.Open) && Number(d.status) !== Status.Open) {
     return { id, status: Number(d.status), skip: `状态为 ${Number(d.status)}，非待提案` };
   }
@@ -74,12 +93,16 @@ export async function loadCase(id, { provider, arbitrator }) {
     return "unknown";
   };
 
-  // 拉取该托管合约的全部证据类事件
-  const logs = await provider.getLogs({
-    address: d.arbitrable,
-    fromBlock: 0,
-    toBlock: "latest",
-  });
+  // 公共节点只留最近约 5 万块日志。从创世扫会直接报错，证据变成空的，AI 只能弃权。
+  const head = await provider.getBlockNumber();
+  const from = Math.max(0, head - config.lookbackBlocks);
+  const logs = await getLogsChunked(
+    provider,
+    { address: d.arbitrable },
+    from,
+    head,
+    config.logRangeMax,
+  );
   const iface = new ethers.Interface(ESCROW_ABI);
 
   const raw = [];

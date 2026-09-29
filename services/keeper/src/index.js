@@ -87,9 +87,13 @@ async function collectOptimistic(clients, ctx) {
 }
 
 async function collectDeals(clients, state, ctx, toBlock) {
-  const from = Math.max(state.fromBlock, toBlock - config.lookbackBlocks);
-  const events = await clients.factory.queryFilter(clients.factory.filters.DealCreated(), from, toBlock);
-  for (const ev of events) state.deals[ev.args.deal] = true;
+  // 工厂自己有交易列表。走 allDeals 而不是 eth_getLogs：
+  // 公共 BSC 节点对 getLogs 动不动就 -32005，新工厂上又几乎没有历史可扫。
+  const n = Number(await clients.factory.allDealsLength());
+  for (let i = 0; i < n; i++) {
+    const addr = await clients.factory.allDeals(i);
+    if (addr && addr !== ethers.ZeroAddress) state.deals[addr] = true;
+  }
 
   const out = [];
   for (const address of Object.keys(state.deals)) {
@@ -132,10 +136,19 @@ export async function tick(clients, state) {
   const blockNumber = block.number;
   const ctx = { now: block.timestamp, blockNumber };
 
+  let dealTasks = [];
+  let dealsOk = false;
+  try {
+    dealTasks = await collectDeals(clients, state, ctx, blockNumber);
+    dealsOk = true;
+  } catch (e) {
+    log("扫描托管交易失败，本轮只推进仲裁层：", e.message);
+  }
+
   const all = [
     ...(await collectJury(clients, ctx)),
     ...(await collectOptimistic(clients, ctx)),
-    ...(await collectDeals(clients, state, ctx, blockNumber)),
+    ...dealTasks,
   ];
 
   const ordered = tasks.prioritize(all.map((x) => x.task))
@@ -151,7 +164,7 @@ export async function tick(clients, state) {
     if (r === "sent" || r === "dry") sent += 1;
   }
 
-  state.fromBlock = blockNumber;
+  if (dealsOk) state.fromBlock = blockNumber;
   saveState(state);
   return sent;
 }

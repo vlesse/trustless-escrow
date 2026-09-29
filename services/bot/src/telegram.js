@@ -66,6 +66,17 @@ export const setMyCommands = (commands) => call("setMyCommands", { commands });
 
 export const getMe = () => call("getMe");
 
+export const getChatMember = (chatId, userId) =>
+  call("getChatMember", { chat_id: chatId, user_id: userId });
+
+export const restrictChatMember = (chatId, userId, permissions) =>
+  call("restrictChatMember", {
+    chat_id: chatId,
+    user_id: userId,
+    permissions,
+    use_independent_chat_permissions: true,
+  });
+
 /// 行内键盘。每行一组按钮。
 export const keyboard = (rows) => ({
   reply_markup: { inline_keyboard: rows },

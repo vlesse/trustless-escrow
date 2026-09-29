@@ -162,6 +162,12 @@ async function main() {
     throw new Error("地址预测失败 —— 部署中途 nonce 被占用，请重新部署");
   }
 
+  if (jury) {
+    await (await jury.setFactory(await factory.getAddress())).wait();
+    await (await jury.setUpstream(actual)).wait();
+    console.log("已把工厂与乐观层登记为陪审团的唯一合法来源");
+  }
+
   // 7. 费率配置。两层的费用必须满足 OPT_COST >= JURY_COST，
   //    否则乐观层在升级争议时付不起陪审团的报酬（合约会在受理时拦住）。
   if (jury) {
@@ -199,31 +205,63 @@ async function main() {
   // 9. 信誉层。刻意放在最后，且完全独立：
   //    它是托管层的只读旁观者 —— 不被 Escrow 调用，也不持有任何资金。
   //    部署失败、写错、甚至根本不部署，托管层的资金安全都不受影响。
+  let identityBond = "";
+  let reputationAddr = "";
   if (process.env.SKIP_REPUTATION !== "1") {
     const bond = await (await ethers.getContractFactory("IdentityBond")).deploy(settlementToken);
     await bond.waitForDeployment();
-    console.log("IdentityBond         ", await bond.getAddress());
+    identityBond = await bond.getAddress();
+    console.log("IdentityBond         ", identityBond);
 
     const reputation = await (await ethers.getContractFactory("Reputation")).deploy(
       await factory.getAddress()
     );
     await reputation.waitForDeployment();
-    console.log("Reputation           ", await reputation.getAddress());
+    reputationAddr = await reputation.getAddress();
+    console.log("Reputation           ", reputationAddr);
   }
 
   // 商家额度池（可选，MERCHANT_BOND=1 启用）。商家把保证金预存进去，
   // 之后每开一单一次调用直接扣，省掉每笔都要 approve 的那一步。
   // 它**不做共享抵押** —— 钱最终还是逐笔进到各自的托管合约里，一笔出事不波及别笔。
+  let merchantBond = "";
   if (process.env.MERCHANT_BOND === '1') {
     const pool = await (await ethers.getContractFactory('MerchantBond')).deploy(
       settlementToken, await factory.getAddress()
     );
     await pool.waitForDeployment();
-    const poolAddr = await pool.getAddress();
-    console.log('MerchantBond         ', poolAddr);
-    await (await factory.setMerchantBond(poolAddr)).wait();
+    merchantBond = await pool.getAddress();
+    console.log('MerchantBond         ', merchantBond);
+    await (await factory.setMerchantBond(merchantBond)).wait();
     console.log('已配置 factory.merchantBond');
   }
+
+  const net = await ethers.provider.getNetwork();
+  const networkName = process.env.HARDHAT_NETWORK || net.name;
+  const dump = {
+    network: networkName,
+    chainId: Number(net.chainId),
+    deployedAt: new Date().toISOString().slice(0, 10),
+    deployer: deployer.address,
+    feeBps,
+    jurySize: Number(jurySize),
+    settlementToken,
+    feeBeneficiary,
+    proposer,
+    escrowImpl: await impl.getAddress(),
+    feeVault: await vault.getAddress(),
+    stakedJury: finalArbitrator,
+    escrowFactory: await factory.getAddress(),
+    optimisticArbitrator: actual,
+    identityBond,
+    reputation: reputationAddr,
+  };
+  if (merchantBond) dump.merchantBond = merchantBond;
+  const fs = require("fs");
+  const path = require("path");
+  const file = path.join(__dirname, "..", `deployments-${networkName}.json`);
+  fs.writeFileSync(file, JSON.stringify(dump, null, 2) + "\n");
+  console.log("\n已写入", file);
 
   console.log("\n后续必须手工完成：");
   console.log("  1. 在区块浏览器上验证全部合约源码（透明度的前提）");

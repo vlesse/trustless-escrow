@@ -64,6 +64,9 @@ export const config = {
   /// 商家额度池（可选）。不配置则整个额度功能静默关闭，担保交易不受影响。
   merchantBond: optAddr("MERCHANT_BOND"),
 
+  /// 测试网结算币。配了之后 /new 不再让用户手贴地址。
+  settlementToken: optAddr("SETTLEMENT_TOKEN"),
+
   /// 陪审团合约（可选）。配了才做抽选风险预警。
   stakedJury: optAddr("STAKED_JURY"),
 
@@ -74,6 +77,10 @@ export const config = {
   /// 「运营者看到之后人工介入」，那就等于把整个项目花力气干掉的那个
   /// 单点又请回来了。不配置则不广播。
   alertChatId: process.env.ALERT_CHAT_ID ?? "",
+
+  /// 官方群。进群默认禁言，点按钮或私聊 /start 后永久放开。
+  /// 不配则只做验证标记，不在群里禁言。
+  groupChatId: process.env.GROUP_CHAT_ID || process.env.ALERT_CHAT_ID || "",
 
   stateFile: process.env.STATE_FILE ?? "./.bot-state.json",
 };
@@ -86,5 +93,6 @@ export function describeConfig() {
     `  签名页:     ${config.signingPageUrl || "(未配置，将只输出原始 calldata)"}`,
     `  限流:       ${config.rateLimitPerMin} 条/分钟/用户`,
     `  信誉层:     ${config.reputation && config.identityBond ? `${config.reputation} / ${config.identityBond}` : "(未配置，已关闭)"}`,
+    `  结算币:     ${config.settlementToken || "(未配置，开单时由用户粘贴)"}`,
   ].join("\n");
 }

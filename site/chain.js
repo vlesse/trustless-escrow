@@ -37,7 +37,7 @@
   ];
   const OPT_ABI = [
     "function nextDisputeID() view returns (uint256)",
-    "function disputes(uint256) view returns (tuple(address arbitrable,address token,address challenger,address dealBuyer,address dealSeller,uint8 status,uint8 proposedRuling,uint64 createdAt,uint64 proposedAt,uint256 bond,uint256 finalCost,uint256 value))",
+    "function disputes(uint256) view returns (tuple(address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value, address dealBuyer, address dealSeller))",
   ];
   const ERC20_ABI = [
     "function decimals() view returns (uint8)",
