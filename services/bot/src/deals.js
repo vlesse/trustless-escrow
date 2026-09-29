@@ -25,6 +25,10 @@ const ESCROW_READ_ABI = [
   "function sellerFunded() view returns (bool)",
   "function deliveryDeadline() view returns (uint64)",
   "function inspectionDeadline() view returns (uint64)",
+  // 窗口总长。到期提醒需要它来判断某一档「还剩 N 小时」是不是一上来就已经
+  // 过了 —— 交付期本身只有 4 小时的时候，「还剩 24 小时」这档毫无意义。
+  "function deliveryWindow() view returns (uint64)",
+  "function inspectionWindow() view returns (uint64)",
 ];
 
 const FACTORY_READ_ABI = [
@@ -70,10 +74,12 @@ export async function loadDeal(addr, provider) {
   const [
     token, buyer, seller, price, buyerBond, sellerBond, feeBps, arbitrator,
     termsHash, state, buyerFunded, sellerFunded, deliveryDeadline, inspectionDeadline,
+    deliveryWindow, inspectionWindow,
   ] = await Promise.all([
     e.token(), e.buyer(), e.seller(), e.price(), e.buyerBond(), e.sellerBond(),
     e.feeBps(), e.arbitrator(), e.termsHash(), e.state(), e.buyerFunded(),
     e.sellerFunded(), e.deliveryDeadline(), e.inspectionDeadline(),
+    e.deliveryWindow(), e.inspectionWindow(),
   ]);
 
   return {
@@ -86,7 +92,18 @@ export async function loadDeal(addr, provider) {
     buyerFunded, sellerFunded,
     deliveryDeadline: Number(deliveryDeadline),
     inspectionDeadline: Number(inspectionDeadline),
+    deliveryWindow: Number(deliveryWindow),
+    inspectionWindow: Number(inspectionWindow),
   };
+}
+
+/// 托管合约此刻真正持有多少币。
+///
+/// 和 buyerFunded/sellerFunded 那两个标志不同：标志说的是「谁按过入金」，
+/// 这个数说的是**钱现在在不在里面**。前者是合约的记账，后者是代币合约的
+/// 事实。给用户看的应该是后者 —— 他要确认的是钱，不是一个布尔值。
+export async function tokenBalance(tokenAddr, owner, provider) {
+  return new ethers.Contract(tokenAddr, ERC20_READ_ABI, provider).balanceOf(owner);
 }
 
 export async function listDeals(address, provider, limit = 10) {

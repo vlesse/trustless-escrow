@@ -45,6 +45,38 @@ const CONFIRMATIONS = config.confirmations;
 /// 到期提醒的档位（秒）。每档每笔交易只提醒一次。
 const REMIND_AT = [24 * 3600, 6 * 3600, 3600];
 
+/**
+ * 当前剩余时间落在哪一档，没有就返回 null。
+ *
+ * **比窗口本身还长的档次要丢掉。** 交付期设成 4 小时的时候，「还剩 24 小时」
+ * 这一档在交易生效的同一秒就已经满足 —— 用户刚收到「资金已锁定，请在
+ * 4 小时内交付」，紧接着又来一条「交付期还剩 3 小时 59 分」。
+ *
+ * 这不只是啰嗦。到期提醒的优先级本来高于事件通知，因为不知情会真的亏钱；
+ * 开头先发一条废话，训练出来的是「这类消息可以不看」，而真正救命的是
+ * 最后那条「还剩 1 小时」。
+ *
+ * 做成纯函数是为了这条规则能被测试真正盖到 —— 它原来写在一个要连链的
+ * 循环里面，改坏了不会有任何东西变红。
+ */
+export function dueBucket({ remaining, window, buckets = REMIND_AT }) {
+  if (remaining <= 0) return null;
+
+  /*
+   * 必须取**还够得着的最小**那一档，不是第一个匹配上的。
+   *
+   * 原来写的是 REMIND_AT.find(t => remaining <= t)，而 REMIND_AT 是降序的
+   * [24h, 6h, 1h] —— 于是只要剩余时间不超过 24 小时，第一个就命中 24h 档，
+   * 永远命中它。每档只提醒一次，所以结果是：**6 小时和 1 小时这两档从来
+   * 没有发出去过**，每笔单每种期限总共只响一声，而且响在最早、最不要紧的
+   * 那个时刻。越接近截止越该催，实际却是越接近越安静。
+   */
+  const t = [...buckets].sort((a, b) => a - b).find((b) => remaining <= b);
+  if (t === undefined) return null;
+  if (window && t >= window) return null;
+  return t;
+}
+
 const provider = makeProvider();
 
 function fmtRemaining(sec) {
@@ -76,11 +108,35 @@ export function describeEvent(name, args, deal, info) {
     case "Deposited": {
       const who = args.party.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
       const other = who === "buyer" ? "seller" : "buyer";
-      return [{
-        to: other,
-        text: `💰 ${tag}\n对方已入金 ${amt(args.amount, info)}。\n` +
-          (deal.buyerFunded && deal.sellerFunded ? "双方资金均已锁定。" : "等待你入金后交易才会锁定。"),
-      }];
+      const both = deal.buyerFunded && deal.sellerFunded;
+
+      /*
+       * 入金的人自己也要收到回执。
+       *
+       * 原来只通知对方 —— 于是你签完一笔把钱锁进合约的交易，机器人一声不吭。
+       * 实测这正是真实用户反复问的那句「我签没签上？」。签名之后的沉默比
+       * 报错更难受：报错至少是个结论。
+       *
+       * 而且还要顺带回答他的下一个问题：对方迟迟不入金怎么办。答案是
+       * 随时可以无损退出，但这件事必须在他刚锁完钱、正准备干等的那一刻说，
+       * 不是藏在某个帮助页里。
+       */
+      return [
+        {
+          to: other,
+          text: `💰 ${tag}\n对方已入金 ${amt(args.amount, info)}。\n` +
+            (both ? "双方资金均已锁定。" : "等待你入金后交易才会锁定。"),
+        },
+        {
+          to: who,
+          text: `✅ ${tag}\n你的 ${amt(args.amount, info)} 已锁进托管合约。\n` +
+            (both
+              ? "双方都已入金，这笔交易正式生效。"
+              : "还差对方那一笔，现在还没有正式生效。\n\n" +
+                "对方一直不入金也不要紧：生效之前任何一方都可以随时「取消交易」，" +
+                "你的钱原路退回，不收任何费用。"),
+        },
+      ];
     }
 
     case "Activated": {
@@ -272,6 +328,62 @@ async function processEvents(notify, tracked, fromBlock, toBlock) {
   }
 }
 
+/**
+ * 一方入金、另一方迟迟不动的提醒。
+ *
+ * 「待入金」状态**链上没有任何期限** —— 它可以无限期挂着。设计上是对的：
+ * 没有任何一方的钱被强制锁死，谁都可以随时无损退出。但产品上有个洞：
+ * 先入金的那个人钱已经进去了，界面上什么也不会再发生，他只能对着
+ * Telegram 干等，而且未必知道自己随时能取回。
+ *
+ * 链上没有「他是什么时候入金的」这个时刻，所以拿机器人第一次看见这个
+ * 状态的时间来计时。这个时间偏晚（机器人可能停过机），偏晚是安全的方向：
+ * 宁可晚提醒，不要在人家刚签完的那一分钟就催。
+ */
+const STALL_AFTER = [6 * 3600, 3 * 86400];
+
+/// 等了这么久，落在哪一档？没到点返回 null。倒序找，取最大的那一档。
+export function stallBucket({ waited, buckets = STALL_AFTER }) {
+  const t = [...buckets].sort((a, b) => b - a).find((b) => waited >= b);
+  return t === undefined ? null : t;
+}
+
+/// 只有一方入金时说什么。都没入金（没人的钱在里面）或都入了（已经生效）
+/// 都返回 null —— 后者尤其重要：那时候已经退不出去了，还说「可以取消」是误导。
+export function describeStalled(deal, waited) {
+  if (deal.buyerFunded === deal.sellerFunded) return null;
+  return {
+    to: deal.buyerFunded ? "buyer" : "seller",
+    // 先拼再转义，只转一次。先转义再插值会把反斜杠又转一遍，用户看到满屏 \\.
+    text: [
+      `⏳ \`${short(deal.address)}\``,
+      esc(`你已入金 ${fmtRemaining(waited)}了，对方一直没有入金，这笔交易还没有生效。`),
+      "",
+      esc("你随时可以「取消交易」把钱原路取回，不收任何费用 —— 生效之前退出是无损的。"),
+      esc("当然也可以继续等，这个状态没有期限，你的钱不会因为放着而少掉。"),
+    ].join("\n"),
+  };
+}
+
+async function remindStalled(notify, deal, now) {
+  const m = describeStalled(deal, 0);
+  if (!m) return;
+
+  // 第一次看见就把时刻记下来，之后靠它计时
+  const seenKey = `stall-seen:${deal.address}`;
+  session.alreadyNotified(seenKey);
+  const since = session.notifiedAt(seenKey);
+  if (!since) return;
+
+  const waited = now - Math.floor(since / 1000);
+  const threshold = stallBucket({ waited });
+  if (threshold === null) return;
+  if (session.alreadyNotified(`stall:${deal.address}:${threshold}`)) return;
+
+  const msg = describeStalled(deal, waited);
+  await pushTo(notify, deal, msg.to, msg.text);
+}
+
 async function checkDeadlines(notify, tracked) {
   const now = Math.floor(Date.now() / 1000);
 
@@ -283,21 +395,29 @@ async function checkDeadlines(notify, tracked) {
       continue;
     }
 
+    // 只有一方入金、卡在「待入金」的单子，另有一套提醒逻辑
+    if (deal.state === State.Open) {
+      await remindStalled(notify, deal, now);
+      continue;
+    }
+
     let kind = null;
     let deadline = 0;
+    let window = 0;
     if (deal.state === State.Funded) {
       kind = "delivery";
       deadline = deal.deliveryDeadline;
+      window = deal.deliveryWindow;
     } else if (deal.state === State.Delivered) {
       kind = "inspection";
       deadline = deal.inspectionDeadline;
+      window = deal.inspectionWindow;
     }
     if (!kind || deadline <= now) continue;
 
     const remaining = deadline - now;
-    // 找到当前落在哪一档，每档每笔交易只提醒一次
-    const threshold = REMIND_AT.find((t) => remaining <= t);
-    if (threshold === undefined) continue;
+    const threshold = dueBucket({ remaining, window });
+    if (threshold === null) continue;
 
     const key = `dl:${addr}:${kind}:${threshold}`;
     if (session.alreadyNotified(key)) continue;

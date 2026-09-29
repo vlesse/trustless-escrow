@@ -7,6 +7,7 @@ import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wa
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
   tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt, untilText, utcText,
+  tokenBalance,
 } from "./deals.js";
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toMessageLink, toEip681, buildFundDeal,
@@ -297,7 +298,22 @@ const NEW_STEPS = [
   { key: "bond", prompt: "保证金金额？双方各出这么多。\n\n建议与货款等额——保证金越低，作恶成本越低。直接发 `same` 表示与货款相同。" },
   { key: "deliveryHours", prompt: "交付期限？（小时，例如 `72`）" },
   { key: "inspectionHours", prompt: "验收期限？（小时，例如 `48`）\n\n买家在此期间内可确认收货或提起争议；超时未操作则自动放款给卖家。" },
-  { key: "terms", prompt: "交易条款原文。写清楚：商品是什么、怎样算交付完成、怎样算验收通过。\n\n争议时仲裁方就看这段文字。写得越具体，越不容易扯皮。" },
+  // 只说「写清楚」是不够的：没写过的人不知道「够清楚」长什么样。
+  // 给一份能直接照抄改的范文，比再多一句叮嘱有用。范文刻意写成
+  // 「可验证的事实」而不是「双方满意」—— 仲裁方能判的只有前者。
+  {
+    key: "terms",
+    prompt: "**最后一步：交易条款原文。**\n\n" +
+      "争议时仲裁方只看这段文字，别的什么都看不到。三件事必须写到：" +
+      "**商品是什么**、**怎样算交付完成**、**怎样算验收通过**。\n\n" +
+      "照着改就行：\n\n" +
+      "`商品：Adobe CC 全家桶 1 年正版激活码 ×1`\n" +
+      "`交付：24 小时内把激活码发到买家 Telegram（@用户名）`\n" +
+      "`验收：激活码能在官方客户端成功激活即算通过`\n" +
+      "`例外：激活码已被使用或无法激活，买家可提起争议`\n\n" +
+      "写成**能查证的事实**，不要写「双方满意」「质量良好」——" +
+      "这种话仲裁方判不了，最后吃亏的是有理的那一方。",
+  },
 ];
 
 function newSteps() {
@@ -491,7 +507,7 @@ export async function cmdDeals(chatId, userId) {
  * 写一条「复现当初那一行」的测试是不够的：那测的是复制品，真货改坏了
  * 照样绿。能被测到，本身就是这个函数存在的理由。
  */
-export function renderDealHeader({ deal, info, role, factoryArbitrator = null }) {
+export function renderDealHeader({ deal, info, role, factoryArbitrator = null, locked = null }) {
   const lines = [
     `*交易* \`${esc(deal.address)}\``,
     "",
@@ -504,11 +520,34 @@ export function renderDealHeader({ deal, info, role, factoryArbitrator = null })
     `你的角色: ${role ? (role === "buyer" ? "买家" : "卖家") : "无关第三方"}`,
   ];
 
+  /*
+   * 合约此刻实际持有多少币。
+   *
+   * 上面那两个 ✅已入金 是**合约自己的记账**，这一行是**代币合约的事实**。
+   * 正常情况下两者当然一致，但用户要确认的是钱，不是一个布尔值 ——
+   * 而且这个数是他在区块浏览器上能独立复核的同一个数。
+   */
+  if (locked !== null) {
+    lines.push(`链上实锁: *${esc(fmtAmount(locked, info))}*`);
+  }
+
   if (deal.state === State.Funded) {
     lines.push(`交付截止: ${esc(untilText(deal.deliveryDeadline))}（${esc(utcText(deal.deliveryDeadline))}）`);
   } else if (deal.state === State.Delivered) {
     lines.push(`验收截止: ${esc(untilText(deal.inspectionDeadline))}（${esc(utcText(deal.inspectionDeadline))}）`);
   }
+
+  /*
+   * 条款哈希。生效之后这一行才真正有分量：上面所有数字从此刻起链上写死，
+   * 谁也改不了，而这串哈希锁住的是**文字**。
+   *
+   * 必须告诉用户它是干什么用的。一串没有解释的十六进制，用户学到的只有
+   * 「看不懂就跳过」—— 而争议时能不能拿回钱，就取决于他手上那份原文
+   * 算出来是不是这一串。
+   */
+  lines.push("", `条款哈希: \`${esc(deal.termsHash)}\``);
+  lines.push(esc("链上只存这串哈希，不存原文。争议时你要提交自己保存的那份原文，"));
+  lines.push(esc("算出来对得上这串，才会被认定为真本。所以那份原文一定要自己留好。"));
 
   /*
    * 仲裁层地址。
@@ -563,7 +602,9 @@ export async function cmdDeal(chatId, userId, addr) {
   // 工厂当前的默认仲裁层，用来替用户做那次比对。读不到就退回只给链接 ——
   // 少一条结论总比给一条错结论好。
   const factoryArbitrator = await factoryAt(provider).defaultArbitrator().catch(() => null);
-  const lines = renderDealHeader({ deal, info, role, factoryArbitrator });
+  // 读不到就不显示这一行。少一个数比给一个错的数好。
+  const locked = await tokenBalance(deal.token, deal.address, provider).catch(() => null);
+  const lines = renderDealHeader({ deal, info, role, factoryArbitrator, locked });
 
   // 对手方信誉。只在「还有得选」的时候才真正有用 ——
   // 钱一旦锁进去，再好看的评估也改变不了什么，所以入金前这段放在最显眼处。
@@ -657,7 +698,14 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
       return;
     case "delivered":
       session.setFlow(userId, "evidence", { deal: deal.address, method: "markDelivered" });
-      await sendMessage(chatId, esc("请提供交付凭证的链接（ipfs:// 或 https://）。没有就发 skip。"));
+      await sendMessage(chatId, [
+        "*标记已交付 · 第 1 步，共 2 步*",
+        "",
+        esc("可以附一个交付凭证的链接（发货截图、物流单号页、网盘链接都行）。"),
+        esc("它只在将来闹争议时有用：仲裁方看的就是这个。现在不填，将来也补不上。"),
+        "",
+        esc("直接把链接粘过来（https:// 或 ipfs:// 开头），或者点下面的按钮跳过。"),
+      ].join("\n"), evidenceSkipKeyboard("markDelivered", deal.address, "没有凭证，直接标记已交付"));
       return;
     case "dispute":
       session.setFlow(userId, "evidence", { deal: deal.address, method: "raiseDispute" });
@@ -666,16 +714,52 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
         esc("· 争议由仲裁层裁决，败诉方的保证金会被罚没给对方"),
         esc("· 恶意申诉同样会被罚没，这不是一个免费的选项"),
         "",
-        esc("请提供证据链接（ipfs:// 或 https://）。没有就发 skip。"),
-      ].join("\n"));
+        esc("请把证据链接粘过来（https:// 或 ipfs:// 开头），或者点下面的按钮不附证据。"),
+      ].join("\n"), evidenceSkipKeyboard("raiseDispute", deal.address, "不附证据，直接提起争议"));
       return;
     case "evidence":
       session.setFlow(userId, "evidence", { deal: deal.address, method: "submitEvidence" });
-      await sendMessage(chatId, esc("请提供证据链接（ipfs:// 或 https://）。"));
+      await sendMessage(chatId, esc("请提供证据链接（https:// 或 ipfs:// 开头）。"));
       return;
     default:
       await sendMessage(chatId, esc("未知操作"));
   }
+}
+
+const EVIDENCE_LABELS = {
+  markDelivered: "标记已交付",
+  raiseDispute: "提起争议",
+  submitEvidence: "提交证据",
+};
+
+/*
+ * 「不填凭证」必须是一个按钮，不能是一个要用户打出来的暗号。
+ *
+ * 原来这里只发一句「没有就发 skip」。实测的结果是：用户点了「标记已交付」，
+ * 收到一句带 ipfs:// 和 skip 的问话，认不出这是下一步，于是反复点那个按钮，
+ * 然后来问「点了没用」。
+ *
+ * 这是同一类错误的第四次 —— 说了该做什么，却没给做的地方（前三次分别是
+ * 「请自行核对仲裁层」「在哪里授权」「哪里确认收货」）。规律很清楚：
+ * **一个动作按钮点下去，必须离签名更近一步，而不是抛出一道问答。**
+ * 需要用户敲字的地方，一律同时给一个按钮。
+ */
+const evidenceSkipKeyboard = (method, deal, label) =>
+  keyboard([[btn(label, `noev:${method}:${deal}`)]]);
+
+/// 按钮跳过证据。校验重做一遍 —— callback_data 是客户端发来的，
+/// 不能因为它是我们自己生成的按钮就当它可信。
+export async function skipEvidence(chatId, userId, method, dealAddr) {
+  if (!EVIDENCE_LABELS[method] || !ethers.isAddress(dealAddr)) {
+    await sendMessage(chatId, esc("这个操作已经失效，请重新 /deal 查看。"));
+    return;
+  }
+  await submitEvidence(chatId, userId, dealAddr, method, "");
+}
+
+async function submitEvidence(chatId, userId, deal, method, uri) {
+  await sendTxs(chatId, [buildAction(deal, method, [uri], EVIDENCE_LABELS[method])]);
+  session.clearFlow(userId);
 }
 
 async function handleEvidenceInput(chatId, userId, text) {
@@ -685,17 +769,13 @@ async function handleEvidenceInput(chatId, userId, text) {
   const uri = v.toLowerCase() === "skip" ? "" : v;
 
   if (uri && !/^(ipfs|https?):\/\//i.test(uri)) {
-    await sendMessage(chatId, esc("请提供 ipfs:// 或 https:// 开头的链接，或发 skip 跳过。"));
+    await sendMessage(chatId,
+      esc("这不像一个链接。请粘贴 https:// 或 ipfs:// 开头的地址，或者点上面那条消息里的按钮跳过。"),
+      evidenceSkipKeyboard(method, deal, `不填凭证，直接${EVIDENCE_LABELS[method]}`));
     return;
   }
 
-  const labels = {
-    markDelivered: "标记已交付",
-    raiseDispute: "提起争议",
-    submitEvidence: "提交证据",
-  };
-  await sendTxs(chatId, [buildAction(deal, method, [uri], labels[method])]);
-  session.clearFlow(userId);
+  await submitEvidence(chatId, userId, deal, method, uri);
 }
 
 // ------------------------------------------------------------------ 流程分发

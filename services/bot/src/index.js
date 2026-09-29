@@ -126,6 +126,10 @@ async function onCallback(q) {
   if (kind === "act") {
     return cmd.runAction(chatId, userId, a, b);
   }
+  // 「不填凭证直接做」。a=合约方法名，b=托管合约地址
+  if (kind === "noev") {
+    return cmd.skipEvidence(chatId, userId, a, b);
+  }
 }
 
 async function main() {

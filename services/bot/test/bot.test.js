@@ -325,7 +325,8 @@ describe("MarkdownV2 转义", () => {
 
 // ====================================================== 事件通知
 
-const { describeEvent, describeDeadline } = await import("../src/watcher.js");
+const { describeEvent, describeDeadline, dueBucket, stallBucket, describeStalled } =
+  await import("../src/watcher.js");
 
 /// MarkdownV2 校验：正文里除了作为语法的 * 和 `，其余特殊字符都必须转义。
 /// 漏一个 Telegram 会直接拒收整条消息 —— 不是显示错乱，是用户什么都收不到。
@@ -384,10 +385,6 @@ describe("事件通知", () => {
   });
 
   test("通知只发给需要知道的那一方", () => {
-    // 买家入金 → 只通知卖家，不给买家发「你自己入金了」
-    const dep = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, deal, info);
-    assert.deepEqual(dep.map((m) => m.to), ["seller"]);
-
     // 卖家标记交付 → 只通知买家（要开始验收的是他）
     const dm = describeEvent("DeliveryMarked",
       { seller: deal.seller, evidenceURI: "", inspectionDeadline: 2_000_100_000n }, deal, info);
@@ -396,6 +393,103 @@ describe("事件通知", () => {
     // 买家提争议 → 只通知卖家
     const dr = describeEvent("DisputeRaised", { by: deal.buyer, disputeID: 1n, evidenceURI: "" }, deal, info);
     assert.deepEqual(dr.map((m) => m.to), ["seller"]);
+  });
+
+  /*
+   * 入金的人自己也必须收到回执。
+   *
+   * 原来只通知对方，理由是「不给他发你自己干的事」。听着合理，实际后果是：
+   * 用户签完一笔把钱锁进合约的交易，机器人一声不吭。真实用户的原话是
+   * 「机器人也没说我签没签」。
+   *
+   * 而且必须在这一刻就告诉他「对方不入金也不要紧，随时可以无损取回」——
+   * 他正是在这一刻开始干等的。
+   */
+  test("入金的人自己也收到回执", () => {
+    const dep = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, deal, info);
+    assert.deepEqual(dep.map((m) => m.to).sort(), ["buyer", "seller"]);
+    const mine = dep.find((m) => m.to === "buyer");
+    assert.match(mine.text, /已锁进托管合约/);
+  });
+
+  test("对方还没入金时，回执要说清可以无损退出", () => {
+    const half = { ...deal, buyerFunded: true, sellerFunded: false };
+    const mine = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, half, info)
+      .find((m) => m.to === "buyer");
+    assert.match(mine.text, /取消交易/);
+    assert.match(mine.text, /原路退回/);
+
+    // 双方都入金了就不该再提退出 —— 那时候已经退不出去了，说了是误导
+    const both = { ...deal, buyerFunded: true, sellerFunded: true };
+    const after = describeEvent("Deposited", { party: deal.buyer, amount: 1n }, both, info)
+      .find((m) => m.to === "buyer");
+    assert.doesNotMatch(after.text, /取消交易/);
+  });
+
+  /*
+   * 交付期 4 小时的单子，生效那一刻就满足「还剩 24 小时」这一档。
+   * 于是用户连收两条几乎一样的消息，而这一类消息本来是最该被认真看的。
+   */
+  test("到期提醒不发比窗口本身还长的档次", () => {
+    const H = 3600;
+    // 窗口 4 小时：24 小时档和 6 小时档都不该发
+    assert.equal(dueBucket({ remaining: 3.9 * H, window: 4 * H }), null);
+    // 但 1 小时档照发 —— 那一条才是真正防止亏钱的
+    assert.equal(dueBucket({ remaining: 0.9 * H, window: 4 * H }), 1 * H);
+
+    // 窗口 72 小时：三档都正常
+    assert.equal(dueBucket({ remaining: 20 * H, window: 72 * H }), 24 * H);
+    assert.equal(dueBucket({ remaining: 5 * H, window: 72 * H }), 6 * H);
+    assert.equal(dueBucket({ remaining: 0.5 * H, window: 72 * H }), 1 * H);
+
+    // 还早、以及已经过期，都不发
+    assert.equal(dueBucket({ remaining: 48 * H, window: 72 * H }), null);
+    assert.equal(dueBucket({ remaining: 0, window: 72 * H }), null);
+
+    // 窗口读不到（0）时不要因此静默掉所有提醒 —— 宁可多发也不要漏
+    assert.equal(dueBucket({ remaining: 3.9 * H, window: 0 }), 6 * H);
+  });
+
+  /*
+   * 这一条盯的是另一个 bug：原来用降序数组上的 find，剩余时间只要不超过
+   * 24 小时就永远命中 24 小时档。每档只提醒一次，所以 6 小时和 1 小时
+   * 这两档一次都没发出去过 —— 越接近截止反而越安静。
+   */
+  test("三档提醒要真的各响一次，不能全被最大那档吃掉", () => {
+    const H = 3600;
+    const window = 72 * H;
+    const fired = [20, 5, 0.5].map((h) => dueBucket({ remaining: h * H, window }));
+    assert.deepEqual(fired, [24 * H, 6 * H, 1 * H]);
+    assert.equal(new Set(fired).size, 3, "三次提醒必须落在三个不同的档位上");
+  });
+
+  /*
+   * 「待入金」链上没有任何期限，可以无限期挂着。设计上对（谁的钱都没被锁死），
+   * 产品上有洞：先入金那个人钱已经进去了，界面上再也不会发生任何事，
+   * 他只能干等，而且未必知道自己随时能取回。
+   */
+  test("一方入金后卡住，到点提醒他可以无损取回", () => {
+    const H = 3600, D = 86400;
+
+    // 刚入金不催；等够了才催
+    assert.equal(stallBucket({ waited: 1 * H }), null);
+    assert.equal(stallBucket({ waited: 7 * H }), 6 * H);
+    // 等更久要落到更大的那一档，否则第二次提醒永远发不出去
+    assert.equal(stallBucket({ waited: 5 * D }), 3 * D);
+
+    const half = { ...deal, buyerFunded: true, sellerFunded: false };
+    const m = describeStalled(half, 7 * H);
+    assert.equal(m.to, "buyer");          // 钱在谁那儿就提醒谁
+    assert.match(m.text, /取消交易/);
+    assert.match(m.text, /原路取回/);
+    assertValidMarkdownV2(m.text, "stalled");
+
+    // 卖家先入金时，提醒的是卖家
+    assert.equal(describeStalled({ ...deal, buyerFunded: false, sellerFunded: true }, 7 * H).to, "seller");
+
+    // 都没入金（没人的钱在里面）和都入了（已经生效、退不出去了）都不该说话
+    assert.equal(describeStalled({ ...deal, buyerFunded: false, sellerFunded: false }, 9 * D), null);
+    assert.equal(describeStalled({ ...deal, buyerFunded: true, sellerFunded: true }, 9 * D), null);
   });
 
   test("到期提醒只发给「不作为会吃亏」的那一方", () => {

@@ -81,6 +81,13 @@ export function alreadyNotified(key) {
   return false;
 }
 
+/// 某个去重键是什么时候第一次记下的，没记过返回 null。
+///
+/// 去重表本来就存了时间戳，所以「我第一次看见这件事是什么时候」是白捡的。
+/// 用它来给那些**链上没有时间戳**的状态计时 —— 比如「一方入金后卡在
+/// 待入金状态多久了」：合约里没有这个时刻，但机器人看见的那一刻有。
+export const notifiedAt = (key) => state.notified[key] ?? null;
+
 /// 谁绑定了这个地址 —— 用于把链上事件推送给对应的 Telegram 用户
 export function findUsersByAddress(address) {
   const a = address.toLowerCase();
