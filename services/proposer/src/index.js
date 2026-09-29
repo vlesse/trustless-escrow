@@ -93,13 +93,13 @@ async function handleDispute(id, clients, state) {
   saveState(state);
 }
 
-/// 扫描历史上所有尚未处理的 Open 状态争议。
-/// 事件订阅会漏掉服务停机期间发生的争议，这个扫描是兜底。
+/// 扫描尚未处理的 Open 状态争议。
+/// 不走从创世块扫事件：公共 RPC 会拒，服务会在最需要它的时候死掉。
+/// 争议 ID 是从 1 自增的，按 nextDisputeID 逐个读状态即可。
 async function scanPending(clients, state) {
   const { arbitrator } = clients;
-  const events = await arbitrator.queryFilter(arbitrator.filters.DisputeCreated(), 0, "latest");
-  for (const ev of events) {
-    const id = ev.args.id;
+  const next = Number(await arbitrator.nextDisputeID());
+  for (let id = 1; id < next; id++) {
     if (state.processed[String(id)]) continue;
     try {
       await handleDispute(id, clients, state);

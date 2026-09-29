@@ -31,13 +31,22 @@ export const PRIVATE_ONLY = new Set([
  *          |{action:"private-only",command:string}
  *          |{action:"flow"}
  *          |{action:"hint"}
+ *          |{action:"group-intro"}
+ *          |{action:"group-gate"}
  *          |{action:"ignore"}}
  */
-export function route({ chatType, text, hasFlow }) {
-  const isPrivate = chatType === "private";
+export function mentionedBot(text, username) {
+  if (!text || !username) return false;
+  const needle = "@" + String(username).replace(/^@/, "").toLowerCase();
+  return text.toLowerCase().includes(needle);
+}
 
-  if (text.startsWith("/")) {
-    const [raw, ...args] = text.split(/\s+/);
+export function route({ chatType, text, hasFlow, mentioned = false, joined = false }) {
+  const isPrivate = chatType === "private";
+  const body = text ?? "";
+
+  if (body.startsWith("/")) {
+    const [raw, ...args] = body.split(/\s+/);
     const command = raw.split("@")[0];          // 群里会带 @botname
     if (!isPrivate && PRIVATE_ONLY.has(command)) return { action: "private-only", command };
     return { action: "command", command, args };
@@ -46,8 +55,13 @@ export function route({ chatType, text, hasFlow }) {
   // 流程输入只在私聊里收。群里的普通发言是聊天，不是在回答机器人的问题。
   if (isPrivate && hasFlow) return { action: "flow" };
 
-  // 群里的普通消息一律不回：机器人在群里是为了广播和查询，不是参与聊天。
-  if (!isPrivate) return { action: "ignore" };
+  // 群里的闲聊一律不回，否则每句「今天天气不错」都冒出来，群没法用。
+  // 但被 @ 点名、或有人刚进群，必须给一句人话 —— 否则陌生人进群会以为机器人坏了。
+  if (!isPrivate) {
+    if (joined) return { action: "group-gate" };
+    if (mentioned) return { action: "group-intro" };
+    return { action: "ignore" };
+  }
 
   return { action: "hint" };
 }

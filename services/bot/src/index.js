@@ -6,7 +6,8 @@ import * as cmd from "./commands.js";
 import * as repcmd from "./repcommands.js";
 import * as quotacmd from "./quotacommands.js";
 import { start as startWatcher } from "./watcher.js";
-import { route } from "./routing.js";
+import { route, mentionedBot } from "./routing.js";
+import * as gate from "./groupgate.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
 /// 用户可能在任意一条消息里粘贴私钥或助记词。
@@ -37,9 +38,21 @@ async function onMessage(msg) {
     return;
   }
 
-  const r = route({ chatType: msg.chat.type, text, hasFlow: cmd.hasFlow(userId) });
+  const mentioned = mentionedBot(text, botUsername);
+  const joined = Array.isArray(msg.new_chat_members) && msg.new_chat_members.length > 0;
+  const r = route({ chatType: msg.chat.type, text, hasFlow: cmd.hasFlow(userId), mentioned, joined });
 
   if (r.action === "ignore") return;
+
+  if (r.action === "group-gate") {
+    log(`user=${userId} group-gate joiners=${(msg.new_chat_members || []).length}`);
+    return gate.handleJoin(msg);
+  }
+
+  if (r.action === "group-intro") {
+    log(`user=${userId} group-intro mentioned=${mentioned}`);
+    return cmd.cmdGroupIntro(chatId, botUsername);
+  }
 
   if (r.action === "private-only") {
     const deep = botUsername ? `https://t.me/${botUsername}?start=1` : null;
@@ -66,7 +79,7 @@ async function onMessage(msg) {
   log(`user=${userId} cmd=${command} private=${isPrivate}`);
 
   switch (command) {
-    case "/start": return cmd.cmdStart(chatId);
+    case "/start": return cmd.cmdStart(chatId, userId, msg.from);
     case "/help": return cmd.cmdHelp(chatId);
     case "/bind": return cmd.cmdBind(chatId, userId, args[0] ?? "");
     case "/whoami": return cmd.cmdWhoami(chatId, userId);
@@ -101,6 +114,9 @@ async function onCallback(q) {
   await answerCallback(q.id, "");
 
   const [kind, a, b] = data.split(":");
+  if (kind === "verify") {
+    return gate.onVerifyCallback(q);
+  }
   if (kind === "new" && a === "role") {
     return cmd.handleFlowInput(chatId, userId, b);
   }
@@ -121,6 +137,7 @@ async function main() {
 
   const me = await getMe();
   botUsername = me.username;
+  gate.setBotUsername(me.username);
   log(`已连接 @${me.username}`);
 
   await setMyCommands([

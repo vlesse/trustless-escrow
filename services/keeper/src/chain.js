@@ -5,6 +5,8 @@ import { config } from "./config.js";
 export const FACTORY_ABI = [
   "event DealCreated(address indexed deal, address indexed buyer, address indexed seller, address token, uint256 price, uint256 buyerBond, uint256 sellerBond, address arbitrator, uint16 feeBps, bytes32 termsHash)",
   "function isDeal(address) view returns (bool)",
+  "function allDealsLength() view returns (uint256)",
+  "function allDeals(uint256) view returns (address)",
 ];
 
 export const ESCROW_ABI = [
@@ -42,8 +44,25 @@ export const REPUTATION_ABI = [
   "function record(address deal)",
 ];
 
+/// 公共 RPC 对 eth_getLogs 跨度有硬上限。一次拉 lookback 整段会在停机后第一次失败，
+/// 然后主循环里游标不前进，推进器永久卡死。
+export async function queryFilterChunked(contract, filter, from, to, maxRange = config.logRangeMax) {
+  if (to < from) return [];
+  const out = [];
+  const span = Math.max(1, maxRange);
+  for (let a = from; a <= to; a += span) {
+    const b = Math.min(a + span - 1, to);
+    out.push(...await contract.queryFilter(filter, a, b));
+  }
+  return out;
+}
+
 export function makeClients() {
-  const provider = new ethers.JsonRpcProvider(config.rpcUrl, undefined, { cacheTimeout: -1 });
+  const provider = new ethers.JsonRpcProvider(config.rpcUrl, undefined, {
+    cacheTimeout: -1,
+    // BSC 公共节点把 eth_getLogs 放进 JSON-RPC batch 会直接 -32005。
+    batchMaxCount: 1,
+  });
   const wallet = new ethers.Wallet(config.privateKey, provider);
   const at = (addr, abi) => (addr ? new ethers.Contract(addr, abi, wallet) : null);
   return {

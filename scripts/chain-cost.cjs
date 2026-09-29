@@ -70,6 +70,8 @@ async function main() {
     await impl.getAddress(), predicted, await vault.getAddress(), FEE_BPS, owner.address);
   const opt = await dep("OptimisticArbitrator",
     await factory.getAddress(), await jury.getAddress(), proposer.address, owner.address);
+  await (await jury.setFactory(await factory.getAddress())).wait();
+  await (await jury.setUpstream(await opt.getAddress())).wait();
   await dep("IdentityBond", await token.getAddress());
   await dep("Reputation", await factory.getAddress());
   await dep("MerchantBond", await token.getAddress(), await factory.getAddress());

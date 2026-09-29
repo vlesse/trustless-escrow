@@ -19,6 +19,7 @@ export const FACTORY_READ_ABI = [
 ];
 export const OPTIMISTIC_READ_ABI = ["function finalArbitrator() view returns (address)"];
 export const JURY_READ_ABI = ["function juryCoverage() view returns (uint256)"];
+export const COST_ABI = ["function arbitrationCost(address token, bytes extraData) view returns (uint256)"];
 
 export const READ_ABIS = {
   EscrowFactory: FACTORY_READ_ABI,
@@ -38,6 +39,13 @@ export function capVerdict({ value, cap }) {
   return { ok: false, over: value - cap };
 }
 
+/// 保证金必须盖住仲裁成本，否则第二笔入金会在激活时 revert，先入金的钱看着像丢了。
+export function bondVerdict({ bond, cost }) {
+  if (cost == null || cost === 0n) return { ok: true };
+  if (BigInt(bond) >= BigInt(cost)) return { ok: true };
+  return { ok: false, need: BigInt(cost), have: BigInt(bond) };
+}
+
 /// 软提示：陪审团的经济承载力。coverage 取不到时返回 null —— 不知道就别报警，
 /// 一个没有依据的警告只会训练用户忽略所有警告。
 export function coverageVerdict({ value, coverage }) {
@@ -51,11 +59,16 @@ export function coverageVerdict({ value, coverage }) {
 /// （接口留了 Kleros adapter 的口子），读不到就返回 null，不要让
 /// 一个可选的提示把开单流程整个打掉。
 export async function loadArbitration(token, factoryAddr, provider) {
-  const out = { cap: null, coverage: null };
+  const out = { cap: null, coverage: null, cost: null };
   try {
     const f = new ethers.Contract(factoryAddr, FACTORY_READ_ABI, provider);
     out.cap = await f.maxDealValue(token);
     const arb = await f.defaultArbitrator();
+    try {
+      out.cost = await new ethers.Contract(arb, COST_ABI, provider).arbitrationCost(token, "0x");
+    } catch {
+      // 读不到成本就不当硬闸，调用方按 null 处理
+    }
     let jury = arb;
     try {
       jury = await new ethers.Contract(arb, OPTIMISTIC_READ_ABI, provider).finalArbitrator();
@@ -101,5 +114,19 @@ export function renderCapRejection({ value, cap, info }) {
     esc("目的是把最坏损失封住。它拦在入金之前，所以你的钱一分都没动。"),
     "",
     esc("把货款或保证金调小到案值不超过上限即可。案值 = 货款 + 双方押金。"),
+  ];
+}
+
+export function renderBondRejection({ bond, cost, info }) {
+  return [
+    "*这单开不出来：保证金低于仲裁成本*",
+    "",
+    `双方保证金: ${amt(bond, info)}`,
+    `当前仲裁成本: ${amt(cost, info)}`,
+    "",
+    esc("双方入金后交易才会锁定。锁定时合约要求保证金盖得住仲裁费，否则争议时败诉方付不起裁决费用。"),
+    esc("第二笔入金会在这一步失败，先入金的那一方只能取消取回。看起来像钱没了。"),
+    "",
+    esc("把保证金调到不低于仲裁成本即可。"),
   ];
 }

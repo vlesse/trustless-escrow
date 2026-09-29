@@ -57,8 +57,10 @@ export const config = {
   /// 连续失败多少次之后放弃这个目标，避免对着一个永远失败的调用无限重试。
   maxAttempts: num("MAX_ATTEMPTS", 5),
 
-  /// 扫描新案件时往回追多少个区块。
-  lookbackBlocks: num("LOOKBACK_BLOCKS", 50_000),
+  /// 扫描新案件时往回追多少个区块。默认比 BSC 公共节点的 5 万块上限更保守。
+  lookbackBlocks: num("LOOKBACK_BLOCKS", 45_000),
+  /// 单次 eth_getLogs 的最大跨度。
+  logRangeMax: num("LOG_RANGE_MAX", 20_000),
 
   stateFile: process.env.STATE_FILE ?? "./.keeper-state.json",
 };

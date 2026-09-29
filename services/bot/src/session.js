@@ -8,7 +8,7 @@ import { config } from "./config.js";
 /// 一旦落盘，这个状态文件就成了一个高价值攻击目标。
 /// 同理，日志里也只打 Telegram 用户 ID 和命令名，不打内容。
 
-let state = { users: {}, notified: {}, watchCursor: 0 };
+let state = { users: {}, notified: {}, watchCursor: 0, verified: {}, pendingGate: {} };
 
 export function load() {
   try {
@@ -16,8 +16,10 @@ export function load() {
     state.users ??= {};
     state.notified ??= {};
     state.watchCursor ??= 0;
+    state.verified ??= {};
+    state.pendingGate ??= {};
   } catch {
-    state = { users: {}, notified: {}, watchCursor: 0 };
+    state = { users: {}, notified: {}, watchCursor: 0, verified: {}, pendingGate: {} };
   }
   return state;
 }
@@ -108,4 +110,27 @@ export function setWatchCursor(n) {
 /// 而不是依赖会被裁剪的日志。
 export function boundAddresses() {
   return Object.values(state.users).map((u) => u.address).filter(Boolean);
+}
+
+export function isVerified(userId) {
+  return Boolean(state.verified[String(userId)]);
+}
+
+export function markVerified(userId) {
+  state.verified[String(userId)] = Date.now();
+  save();
+}
+
+export function pendingGate(chatId, userId) {
+  return state.pendingGate[`${chatId}:${userId}`] ?? null;
+}
+
+export function setPendingGate(chatId, userId, messageId) {
+  state.pendingGate[`${chatId}:${userId}`] = { messageId, at: Date.now() };
+  save();
+}
+
+export function clearPendingGate(chatId, userId) {
+  delete state.pendingGate[`${chatId}:${userId}`];
+  save();
 }

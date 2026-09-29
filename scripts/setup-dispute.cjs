@@ -38,6 +38,8 @@ async function main() {
   const optimistic = await (await ethers.getContractFactory("OptimisticArbitrator")).deploy(
     await factory.getAddress(), await jury.getAddress(), proposer.address, deployer.address
   );
+  await jury.setFactory(await factory.getAddress());
+  await jury.setUpstream(await optimistic.getAddress());
   await optimistic.setCost(await token.getAddress(), U(100), U(50));
 
   for (const s of [buyer, seller, proposer]) {

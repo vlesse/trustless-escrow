@@ -85,4 +85,22 @@ describe("官网", () => {
         `${s} 是外链。一个职责是「让你核对」的页面，不该把自己的完整性交给第三方脚本`);
     }
   });
+
+  test("index.html 在 chain.js 之前加载 chain-config.js", () => {
+    const srcs = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)].map((m) => m[1]);
+    const iCfg = srcs.indexOf("chain-config.js");
+    const iChain = srcs.indexOf("chain.js");
+    assert.ok(iCfg >= 0, "漏了 chain-config.js，公示数字页会直接崩");
+    assert.ok(iCfg < iChain, "chain-config.js 必须在 chain.js 之前，否则 SITE_CHAIN 是 undefined");
+  });
+
+  test("disputes ABI 字段顺序与合约结构体一致", () => {
+    const sol = fs.readFileSync(path.join(ROOT, "..", "contracts", "arbitration", "OptimisticArbitrator.sol"), "utf8");
+    const body = sol.match(/struct Dispute \{([^}]+)\}/)[1];
+    const fields = [...body.matchAll(/^\s+\S+(?:\s+\S+)?\s+(\w+);/gm)].map((m) => m[1]);
+    const abi = chain.match(/function disputes\(uint256\) view returns \(tuple\(([^)]+)\)/);
+    assert.ok(abi, "chain.js 里找不到 disputes ABI");
+    const abiFields = abi[1].split(",").map((s) => s.trim().split(/\s+/).pop());
+    assert.deepEqual(abiFields, fields, "字段顺序错了会把 challenger 读成别的槽，公示的「被挑战」数是假的");
+  });
 });

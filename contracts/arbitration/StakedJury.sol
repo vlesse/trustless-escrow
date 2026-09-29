@@ -5,6 +5,10 @@ import {IEscrowArbitrator, IEscrowArbitrable, IEscrowTerms} from "../interfaces/
 import {SafeTransfer} from "../lib/SafeTransfer.sol";
 import {IRandomnessSource} from "../interfaces/IRandomnessSource.sol";
 
+interface IDealRegistry {
+    function isDeal(address) external view returns (bool);
+}
+
 /// @title StakedJury
 /// @notice 终局仲裁方：质押陪审团 + commit-reveal 投票 + 可上诉。
 ///
@@ -231,6 +235,13 @@ contract StakedJury is IEscrowArbitrator {
 
     address public admin;
 
+    /// @notice 交易工厂。createDispute 只接受这里登记过的托管实例，或 `upstream`。
+    /// @dev 不设来源限制的话，任何人都能用 extraData 开假案，抽选时锁住真陪审员，
+    ///      再在揭示期结束后立刻计票，把不知情而不揭示的人当装死罚没。
+    IDealRegistry public factory;
+    /// @notice 乐观仲裁层。它不是托管实例，但升级争议时会调 createDispute。
+    address public upstream;
+
     // -------------------------------------------------------------- 事件
 
     event Staked(address indexed juror, uint256 amount, uint256 total);
@@ -261,6 +272,8 @@ contract StakedJury is IEscrowArbitrator {
     event RandomnessRequestFailed(uint256 indexed id, uint256 indexed round, address indexed source);
     /// @notice 等待超时，本轮放弃外部随机数，仅用区块哈希抽选。
     event RandomnessTimedOut(uint256 indexed id, uint256 indexed round, address indexed source);
+    event FactorySet(address indexed factory);
+    event UpstreamSet(address indexed upstream);
 
     // -------------------------------------------------------------- 错误
 
@@ -285,6 +298,8 @@ contract StakedJury is IEscrowArbitrator {
     error TreeCorrupted();
     error JuryPoolFull();
     error Reentrancy();
+    error NotAllowedCaller();
+    error AlreadySet();
 
     /// @dev 与 `Escrow` 同一份实现。本合约会把任意 ERC20 转进转出
     ///      （币种由每笔交易决定，只要管理员给它配过价），而带转账回调的代币
@@ -382,6 +397,7 @@ contract StakedJury is IEscrowArbitrator {
     ///      正确的做法是让案件挂在待抽选，`drawJurors` 那一步才要求池子非空；
     ///      迟迟凑不齐人由 `ROUND_TIMEOUT` 兜底，资金照样不会锁死。
     function createDispute(uint256 choices, bytes calldata extraData) external nonReentrant returns (uint256 id) {
+        if (!_allowedCaller(msg.sender)) revert NotAllowedCaller();
         if (choices != 2) revert BadRuling();
 
         (address feeToken, uint256 value, address b, address sl) = _terms(extraData);
@@ -1086,7 +1102,36 @@ contract StakedJury is IEscrowArbitrator {
     }
 
     function setCost(address token, uint256 cost) external onlyAdmin {
+        if (cost == 0) revert CostNotConfigured();
         costOf[token] = cost;
+    }
+
+    /// @notice 登记交易工厂。只能设一次。
+    function setFactory(address f) external onlyAdmin {
+        if (address(factory) != address(0)) revert AlreadySet();
+        if (f == address(0)) revert ZeroAddress();
+        factory = IDealRegistry(f);
+        emit FactorySet(f);
+    }
+
+    /// @notice 登记乐观层。只能设一次。
+    function setUpstream(address u) external onlyAdmin {
+        if (upstream != address(0)) revert AlreadySet();
+        if (u == address(0)) revert ZeroAddress();
+        upstream = u;
+        emit UpstreamSet(u);
+    }
+
+    function _allowedCaller(address caller) private view returns (bool) {
+        if (upstream != address(0) && caller == upstream) return true;
+        if (address(factory) != address(0)) {
+            try factory.isDeal(caller) returns (bool ok) {
+                return ok;
+            } catch {
+                return false;
+            }
+        }
+        return false;
     }
 
     /// @notice 转移管理员。转给 address(0) 即永久放弃配置权，
