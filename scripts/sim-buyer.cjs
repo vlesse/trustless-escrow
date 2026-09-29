@@ -31,8 +31,11 @@ async function main() {
   const dec = Number(await read("读精度", () => token.decimals()));
   const f = (x) => ethers.formatUnits(x, dec);
 
-  const show = async (label) => {
-    const s = await read("读状态", () => deal.summary());
+  // blockTag 可选。发完交易之后的那次读必须钉在回执区块上 —— 实测不钉的话
+  // 对账全对、紧接着这一行却打出「状态=Delivered 锁定=1500」，读到的是
+  // 一台还没同步的节点。一行假的状态输出比没有输出更坏。
+  const show = async (label, blockTag) => {
+    const s = await read("读状态", () => deal.summary(blockTag ? { blockTag } : {}));
     console.log(`${label}  状态=${STATE[Number(s.s)]}  锁定=${f(s.locked)}  买=${s.bFunded}  卖=${s.sFunded}`);
     return s;
   };
@@ -78,11 +81,63 @@ async function main() {
     }
     const rc = await confirm(ethers.provider, await deal.connect(buyer).depositBuyer());
     console.log("  入金 " + f(need) + "  " + rc.gasUsed + " gas  " + rc.hash);
+    await show("之后", rc.blockNumber);
+    return;
   } else if (step === "confirm") {
     // Funded(2) 或 Delivered(3) 都可以确认收货 —— 买家随时有权主动放行。
     if (![2, 3].includes(Number(before.s))) throw new Error("现在这个状态确认不了收货");
+
+    /*
+     * 对账，不看事件。只看 state 变成 Resolved 的测试会放过「结算了但金额算错」。
+     *
+     * 前后余额都钉在具体区块上读：公共 RPC 后面是一组节点，不钉块号的话
+     * 「之后」那次可能落到一台还没同步到回执高度的节点上，读出来的是旧值。
+     */
+    const [price, bBond, sBond, feeBps, seller] = await Promise.all([
+      read("读货款", () => deal.price()),
+      read("读买家押金", () => deal.buyerBond()),
+      read("读卖家押金", () => deal.sellerBond()),
+      read("读费率", () => deal.feeBps()),
+      read("读卖家", () => deal.seller()),
+    ]);
+    const vault = D.feeVault;
+    const who = { buyer: buyer.address, seller, vault, deal: addr };
+    const snap = async (blockTag) => {
+      const out = {};
+      for (const [k, a] of Object.entries(who)) {
+        out[k] = await read("查余额", () => token.balanceOf(a, { blockTag }));
+      }
+      return out;
+    };
+
+    const pre = await read("读块高", () => ethers.provider.getBlockNumber());
+    const b0 = await snap(pre);
     const rc = await confirm(ethers.provider, await deal.connect(buyer).confirmReceipt());
     console.log("  确认收货  " + rc.gasUsed + " gas  " + rc.hash);
+    const b1 = await snap(rc.blockNumber);
+
+    const fee = (price * BigInt(feeBps)) / 10000n;
+    const want = {
+      seller: price - fee + sBond,       // 货款扣手续费，外加自己的押金原路退回
+      buyer: bBond,                      // 只拿回押金；货款早在入金时就出去了
+      vault: fee,
+      deal: -(price + bBond + sBond),    // 必须清空，一个 wei 都不能留
+    };
+
+    console.log("\n=== 对账 ===");
+    let bad = 0;
+    for (const k of Object.keys(want)) {
+      const got = b1[k] - b0[k];
+      const ok = got === want[k];
+      if (!ok) bad++;
+      console.log("  " + k.padEnd(7) + ("净变动 " + f(got)).padEnd(22) +
+        (ok ? "✓" : "✗ 应为 " + f(want[k])));
+    }
+    if (b1.deal !== 0n) { bad++; console.log("  托管合约还剩 " + f(b1.deal) + " ✗"); }
+    if (bad) { await show("之后", rc.blockNumber); throw new Error(bad + " 项对不上"); }
+    console.log("  全部一致。手续费 " + f(fee) + "（" + Number(feeBps) / 100 + "%）进了金库。");
+    await show("之后", rc.blockNumber);
+    return;
   } else {
     throw new Error("STEP 只能是 deposit 或 confirm");
   }

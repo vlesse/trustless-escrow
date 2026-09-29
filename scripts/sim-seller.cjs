@@ -21,6 +21,7 @@ async function main() {
   const addr = process.env.DEAL;
   if (!addr || !ethers.isAddress(addr)) throw new Error("DEAL 缺失或不是合法地址");
   const step = process.env.STEP || "deposit";
+  let last = null;   // 最后一笔交易的回执块号
 
   const seller = new ethers.Wallet(W.seller.privateKey, ethers.provider);
   const deal = await ethers.getContractAt("Escrow", addr);
@@ -28,8 +29,9 @@ async function main() {
   const dec = Number(await read("读精度", () => token.decimals()));
   const f = (x) => ethers.formatUnits(x, dec);
 
-  const show = async (label) => {
-    const s = await read("读状态", () => deal.summary());
+  // 发完交易之后的那次读必须钉在回执区块上，理由见 sim-buyer.cjs 同名函数
+  const show = async (label, blockTag) => {
+    const s = await read("读状态", () => deal.summary(blockTag ? { blockTag } : {}));
     console.log(`${label}  状态=${STATE[Number(s.s)]}  锁定=${f(s.locked)}  买=${s.bFunded}  卖=${s.sFunded}`);
     return s;
   };
@@ -47,17 +49,19 @@ async function main() {
     }
     const rc = await confirm(ethers.provider, await deal.connect(seller).depositSeller());
     console.log("  入押金 " + f(bond) + "  " + rc.gasUsed + " gas  " + rc.hash);
+    last = rc.blockNumber;
   } else if (step === "deliver") {
     if (Number(before.s) !== 2) throw new Error("现在不是 Funded 状态，发不了货");
     const rc = await confirm(ethers.provider,
       await deal.connect(seller).markDelivered("data:text/plain;base64," +
         Buffer.from("激活码 TEST-1234-ABCD-5678 已于交付期内发送至买家指定邮箱。", "utf8").toString("base64")));
     console.log("  标记发货  " + rc.gasUsed + " gas  " + rc.hash);
+    last = rc.blockNumber;
   } else {
     throw new Error("STEP 只能是 deposit 或 deliver");
   }
 
-  await show("之后");
+  await show("之后", last);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
