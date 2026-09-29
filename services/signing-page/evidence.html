@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>证据 · 人人担保</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --text:#e8eaed; --muted:#9aa0a6; --line:#2a2f3a;
+          --ok:#3ecf8e; --bad:#ff6b6b; --warn:#f5b041; --accent:#6c8cff; }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f6f7f9; --card:#fff; --text:#1f2328; --muted:#636c76; --line:#d0d7de;
+            --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700; --accent:#3b5bdb; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font: 15px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 20px 16px 60px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 14px 16px; margin: 0 0 12px; }
+  .verdict { font-weight: 600; }
+  .verdict.ok { color: var(--ok); } .verdict.bad { color: var(--bad); }
+  .kv { display: grid; grid-template-columns: 72px 1fr; gap: 4px 10px; font-size: 13px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; word-break: break-all;
+          font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+  .n { color: var(--muted); font-size: 12px; margin: 0 0 6px; }
+  .text { white-space: pre-wrap; word-break: break-word; margin: 0; }
+  .link { word-break: break-all; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  .warn { color: var(--warn); font-size: 12.5px; margin: 6px 0 0; }
+  img { display: block; max-width: 100%; border-radius: 8px; border: 1px solid var(--line); }
+  .imgcheck { font-size: 12px; margin: 6px 0 0; }
+  .imgcheck.ok { color: var(--ok); } .imgcheck.bad { color: var(--bad); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>证据</h1>
+  <p class="sub">这是一笔担保交易里某一方提交的证据。内容一旦上链就不能删改。</p>
+
+  <div class="card"><p id="verdict" class="verdict">正在核对……</p>
+    <p class="sub" id="how" style="margin:6px 0 0"></p></div>
+  <div class="card" id="meta" hidden><dl class="kv" id="kv"></dl></div>
+  <div id="items"></div>
+</main>
+<script src="evidence.js"></script>
+</body>
+</html>

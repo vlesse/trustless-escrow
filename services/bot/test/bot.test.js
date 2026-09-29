@@ -8,6 +8,8 @@ process.env.TELEGRAM_BOT_TOKEN ??= "test:token";
 process.env.RPC_URL ??= "http://127.0.0.1:8545";
 process.env.ESCROW_FACTORY ??= "0x0000000000000000000000000000000000000001";
 process.env.CHAIN_ID ??= "42161";
+process.env.EVIDENCE_BASE_URL ??= "https://db.example/evidence";
+process.env.SIGNING_PAGE_URL ??= "https://db.example";
 
 const { scanForSecrets, SecretKind } = await import("../src/secrets.js");
 const { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } = await import("../src/wallet.js");
@@ -326,7 +328,7 @@ describe("MarkdownV2 转义", () => {
 // ====================================================== 事件通知
 
 const { describeEvent, describeDeadline, dueBucket, stallBucket, describeStalled,
-  describeCreated, approvedOnly, describeApprovedOnly, progressLine, cnTime } =
+  describeCreated, approvedOnly, describeApprovedOnly, progressLine, cnTime, evidenceLines } =
   await import("../src/watcher.js");
 
 /// MarkdownV2 校验：正文里除了作为语法的 * 和 `，其余特殊字符都必须转义。
@@ -434,6 +436,26 @@ describe("事件通知", () => {
     // 文字证据要解码成原文，不是一串 base64
     assert.ok(mine.includes(say) && theirs.includes(say));
     assert.doesNotMatch(mine, /base64/);
+  });
+
+  test("带图片的证据包：概括 + 能点开的查看页，读不到包也不能出错", () => {
+    const sha = "c".repeat(64);
+    const uri = `https://db.example/evidence/${sha}.json`;
+    const bundle = { items: [
+      { type: "text", text: "卖家 22:10 发来的激活码" }, { type: "image", sha256: "d".repeat(64), ext: "jpg" },
+      { type: "image", sha256: "e".repeat(64), ext: "png" }] };
+    const lines = evidenceLines(uri, "对方提交的内容", true, { readBundle: () => bundle }).join("\n");
+    assert.match(lines, /文字 1 段、图片 2 张/);
+    assert.ok(lines.includes("卖家 22:10 发来的激活码"));
+    assert.ok(lines.includes(`https://db.example/evidence.html#${sha}`), "要能点开看图");
+    // 本文件的检查器不认链接语法，去掉链接再查其余部分（链接本身在 markdown.test.js 里查）
+    assertValidMarkdownV2(lines.replace(/\[[^\]]*\]\([^)]*\)/g, ""), "bundle");
+
+    // 包文件丢了/被改了（readBundle 核对哈希失败返回 null）：仍然给链接，不崩
+    const lost = evidenceLines(uri, "对方提交的内容", true, { readBundle: () => null }).join("\n");
+    assert.match(lost, /证据包/);
+    // 本文件的检查器不认链接语法，去掉链接再查其余部分（链接本身在 markdown.test.js 里查）
+    assertValidMarkdownV2(lost.replace(/\[[^\]]*\]\([^)]*\)/g, ""), "bundle-lost");
   });
 
   test("对方给的链接要提醒小心，自己的不用", () => {

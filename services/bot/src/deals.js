@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import { config } from "./config.js";
+import { loadArbitration, arbitrationActions } from "./disputestatus.js";
 
 export const State = {
   None: 0, Open: 1, Funded: 2, Delivered: 3, Disputed: 4, Resolved: 5, Cancelled: 6,
@@ -94,6 +95,11 @@ export async function loadDeal(addr, provider) {
     inspectionDeadline: Number(inspectionDeadline),
     deliveryWindow: Number(deliveryWindow),
     inspectionWindow: Number(inspectionWindow),
+    // 争议中的交易带上仲裁快照：挑战/上诉按钮、以及「进行到哪了」都要靠它。
+    // 读失败不影响其它功能 —— 没有快照就只是少了那两个按钮。
+    arb: Number(state) === State.Disputed
+      ? await loadArbitration({ address: ethers.getAddress(addr), arbitrator }, provider).catch(() => null)
+      : null,
   };
 }
 
@@ -176,6 +182,7 @@ export function availableActions(deal, role, now = Math.floor(Date.now() / 1000)
 
     case State.Disputed:
       add("evidence", "提交证据", "争议期内可持续补充");
+      for (const a of arbitrationActions(deal.arb, role, now)) add(a.id, a.label);
       break;
 
     default:

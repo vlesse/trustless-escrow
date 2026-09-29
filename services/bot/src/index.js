@@ -17,10 +17,26 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 let botUsername = "";
 
 
+/// 消息里的图片：照片（取最大的那一档）或者以文件方式发的图片。
+function imageOf(msg) {
+  if (Array.isArray(msg.photo) && msg.photo.length) {
+    const p = msg.photo[msg.photo.length - 1];
+    return { fileId: p.file_id, fileSize: p.file_size ?? 0 };
+  }
+  if (msg.document && /^image\//.test(msg.document.mime_type ?? "")) {
+    return { fileId: msg.document.file_id, fileSize: msg.document.file_size ?? 0 };
+  }
+  return null;
+}
+
+const hasAnyMedia = (msg) => Boolean(msg.photo || msg.document || msg.video || msg.voice ||
+  msg.audio || msg.sticker || msg.animation || msg.video_note);
+
 async function onMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
-  const text = msg.text ?? "";
+  // 图片的说明文字在 caption 里。一样要过私钥检测 —— 有人会把助记词写在图注里。
+  const text = msg.text ?? msg.caption ?? "";
   const isPrivate = msg.chat.type === "private";
 
   if (!session.rateLimit(userId)) {
@@ -69,13 +85,22 @@ async function onMessage(msg) {
   if (r.action === "flow") {
     // 发的是图片/文件时，text 是空的。必须把这件事告诉流程 ——
     // 否则提交证据那一步会把空字符串当成「不附证据」放行。
-    const hasMedia = Boolean(msg.photo || msg.document || msg.video || msg.voice ||
-      msg.audio || msg.sticker || msg.animation || msg.video_note);
-    log(`user=${userId} flow-input${hasMedia ? " (media)" : ""}`);
-    return cmd.handleFlowInput(chatId, userId, text, { hasMedia });
+    const image = imageOf(msg);
+    const hasMedia = !image && hasAnyMedia(msg);
+    log(`user=${userId} flow-input${image ? " (image)" : hasMedia ? " (media)" : ""}`);
+    return cmd.handleFlowInput(chatId, userId, text, { hasMedia, image });
   }
 
   if (r.action === "hint") {
+    // 没在提交证据的时候发来一张图：多半就是想交证据，只是不知道要先点按钮。
+    // 真实用户原话：「你不说，我都不知道，我就随手就发了。」
+    if (hasAnyMedia(msg)) {
+      return sendMessage(chatId, [
+        esc("图片我先不收：现在不在提交证据的步骤里。"),
+        "",
+        esc("要交证据：发 /deals 找到那笔交易 → 点「提起争议」「提交证据」或「标记已交付」→ 再把图片发过来。"),
+      ].join("\n"));
+    }
     return sendMessage(chatId, esc("发送 /help 查看可用命令。"));
   }
 
@@ -134,6 +159,9 @@ async function onCallback(q) {
   if (kind === "noev") {
     return cmd.skipEvidence(chatId, userId, a, b);
   }
+  // 证据篮：全部提交 / 清空重来。a=托管合约地址
+  if (kind === "evsub") return cmd.submitBasket(chatId, userId, a);
+  if (kind === "evclr") return cmd.clearBasket(chatId, userId, a);
 }
 
 async function main() {

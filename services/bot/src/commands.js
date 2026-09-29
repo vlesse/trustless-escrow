@@ -11,6 +11,7 @@ import {
 } from "./deals.js";
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toFlowLink, toMessageLink, toEip681, buildFundDeal,
+  buildChallengeFlow, buildAppealFlow,
 } from "./txlink.js";
 import {
   dealValue, capVerdict, loadArbitration, renderArbitrationNotes, renderCapRejection,
@@ -19,7 +20,10 @@ import {
 import * as gate from "./groupgate.js";
 import * as quota from "./quota.js";
 import * as quotacmd from "./quotacommands.js";
-import { parseEvidenceInput, describeEvidence, REJECT_TEXT, EVIDENCE_HOWTO } from "./evidence.js";
+import {
+  parseEvidenceInput, canAdd, planSubmission, buildBundle, summarizeItems, REJECT_TEXT, EVIDENCE_HOWTO,
+} from "./evidence.js";
+import * as evstore from "./evidencestore.js";
 
 const provider = makeProvider();
 
@@ -35,6 +39,8 @@ const TX_NOTE = {
   depositBuyer: "这一步真正把钱锁进托管合约。锁进去之后就只能按合约规则流转，" +
     "任何人都无法挪用，包括运营方。",
   depositSeller: "这一步真正把保证金锁进托管合约。",
+  challenge: "押上保证金，把案子从 AI 交给陪审团重新判。陪审团判你对，押金退回并拿到对方那份；判你错，押金归对方。",
+  appeal: "付上诉费，交给更多陪审员重新判。改判的话拖延押金退还；维持原判，拖延押金赔给对方。",
 };
 
 /// 把一个交易请求渲染成可签名的三种形式。
@@ -77,6 +83,8 @@ const STEP_SHORT = {
   depositBuyer: "入金 —— 真正把钱存进这笔交易的合约",
   depositSeller: "入金 —— 真正把押金存进这笔交易的合约",
   deposit: "存入额度",
+  challenge: "挑战 —— 把案子交给陪审团重新判",
+  appeal: "上诉 —— 交给更多陪审员重新判",
 };
 
 /**
@@ -89,11 +97,15 @@ const STEP_SHORT = {
 export function renderFlow(txs) {
   const title = txs.some((t) => /^deposit(Buyer|Seller)$/.test(t.method)) ? "入金"
     : txs[txs.length - 1].label;
+  // 授权那一步在挑战/上诉里意思不一样：划走的是押金/上诉费，不是货款
+  const short = (t) => (t.method === "approve" && /^(challenge|appeal)$/.test(txs[txs.length - 1].method)
+    ? "授权 —— 不转账，只是允许仲裁合约下一步划走" + (txs[txs.length - 1].method === "challenge" ? "押金" : "上诉费")
+    : STEP_SHORT[t.method] ?? t.label);
   const lines = [
     `*${esc(title)}：共 ${txs.length} 步*`,
     "",
     esc("点下面的按钮，在网页里用你的钱包签名。"),
-    ...txs.map((t, i) => esc(`第 ${i + 1} 步：${STEP_SHORT[t.method] ?? t.label}`)),
+    ...txs.map((t, i) => esc(`第 ${i + 1} 步：${short(t)}`)),
     "",
     esc(`签完第 1 步，网页会直接带你签下一步，不用回来找。`),
     `*${esc(`⚠️ ${txs.length} 步都签完才算成功。只签第 1 步，钱还在你自己钱包里。`)}*`,
@@ -740,6 +752,28 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
     case "cancel":
       await sendTxs(chatId, [buildAction(deal.address, "cancelUnfunded", [], "取消交易")]);
       return;
+    case "challenge":
+    case "appeal": {
+      // 能走到这里，说明 availableActions 已经按链上快照确认过：窗口还开着、结果对他不利
+      const a = deal.arb;
+      const isChallenge = actionId === "challenge";
+      const spender = isChallenge ? a.optAddr : a.juryAddr;
+      const amount = isChallenge ? a.bond : a.appealTotal;
+      const token = isChallenge ? a.token : deal.token;
+      const flow = isChallenge
+        ? buildChallengeFlow({ token, opt: spender, bond: amount, disputeId: a.optId })
+        : buildAppealFlow({ token, jury: spender, total: amount, caseId: a.caseId });
+
+      await sendMessage(chatId, [
+        `*${esc(isChallenge ? "挑战 AI 的裁决" : "上诉")}*`,
+        "",
+        esc(`你要${isChallenge ? "押" : "付"} ${fmtAmount(amount, info)}。`),
+        esc(TX_NOTE[actionId]),
+      ].join("\n"));
+      const allowance = await tokenAllowance(token, u.address, spender, provider).catch(() => 0n);
+      await sendTxs(chatId, allowance >= amount ? [flow[1]] : flow);
+      return;
+    }
     case "confirm":
       await sendMessage(chatId, esc("确认收货后货款立即放给卖家，且不可撤销。确定收到货并验收无误再操作。"));
       await sendTxs(chatId, [buildAction(deal.address, "confirmReceipt", [], "确认收货并放款")]);
@@ -751,39 +785,35 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
       await sendTxs(chatId, [buildAction(deal.address, "claimNonDelivery", [], "索取退款")]);
       return;
     case "delivered":
-      session.setFlow(userId, "evidence", { deal: deal.address, method: "markDelivered" });
+      startEvidence(userId, deal.address, "markDelivered");
       await sendMessage(chatId, [
-        "*标记已交付 · 第 1 步，共 2 步*",
+        "*标记已交付 · 先附上交付凭证*",
         "",
-        esc("可以附一个交付凭证，比如：快递单号、发货时间、你是怎么把东西交给买家的。"),
-        esc("它只在将来闹争议时有用：仲裁方看的就是这个。现在不填，将来也补不上。"),
+        esc("比如：快递单号、发货截图、你是怎么把东西交给买家的。"),
+        esc("它只在将来闹争议时有用：仲裁方看的就是这个。现在不附，将来也补不上。"),
         "",
         esc(EVIDENCE_HOWTO),
-        "",
-        esc("没有凭证就点下面的按钮。"),
-      ].join("\n"), evidenceSkipKeyboard("markDelivered", deal.address, "没有凭证，直接标记已交付"));
+      ].join("\n"), evidenceKeyboard("markDelivered", deal.address, []));
       return;
     case "dispute":
-      session.setFlow(userId, "evidence", { deal: deal.address, method: "raiseDispute" });
+      startEvidence(userId, deal.address, "raiseDispute");
       await sendMessage(chatId, [
         esc("提起争议前请想清楚："),
         esc("· 争议由仲裁层裁决，败诉方的保证金会被罚没给对方"),
         esc("· 恶意申诉同样会被罚没，这不是一个免费的选项"),
         "",
-        "*现在把你的理由和证据发给我：*",
+        "*现在把你的理由和证据发给我*",
         esc(EVIDENCE_HOWTO),
         "",
-        esc("暂时不想写，就点下面的按钮。之后随时可以用「提交证据」补充。"),
-      ].join("\n"), evidenceSkipKeyboard("raiseDispute", deal.address, "不附证据，直接提起争议"));
+        esc("暂时不想写，点下面的按钮直接提起争议。之后随时可以用「提交证据」补充。"),
+      ].join("\n"), evidenceKeyboard("raiseDispute", deal.address, []));
       return;
     case "evidence":
-      session.setFlow(userId, "evidence", { deal: deal.address, method: "submitEvidence" });
+      startEvidence(userId, deal.address, "submitEvidence");
       await sendMessage(chatId, [
         "*提交证据*",
         "",
         esc(EVIDENCE_HOWTO),
-        "",
-        esc("可以提交多次，每次一条。"),
       ].join("\n"));
       return;
     default:
@@ -798,19 +828,33 @@ const EVIDENCE_LABELS = {
 };
 
 /*
- * 「不填凭证」必须是一个按钮，不能是一个要用户打出来的暗号。
+ * 证据篮。
  *
- * 原来这里只发一句「没有就发 skip」。实测的结果是：用户点了「标记已交付」，
- * 收到一句带 ipfs:// 和 skip 的问话，认不出这是下一步，于是反复点那个按钮，
- * 然后来问「点了没用」。
+ * 原来一次只收一条：发一段话 → 签一次名。真实用户的问题是「我整理证据不可能
+ * 几十秒就完，中间能不能多次发文字、多次发链接？」—— 按原来的做法，每一条都要
+ * 单独签一次名、付一次 gas。现在：文字、链接、图片想发几条发几条，
+ * 每条都回「收到第 N 条」，最后点「全部提交」只签一次。
  *
- * 这是同一类错误的第四次 —— 说了该做什么，却没给做的地方（前三次分别是
- * 「请自行核对仲裁层」「在哪里授权」「哪里确认收货」）。规律很清楚：
- * **一个动作按钮点下去，必须离签名更近一步，而不是抛出一道问答。**
- * 需要用户敲字的地方，一律同时给一个按钮。
+ * 篮子存在会话里。里面会有用户的原话 —— 会话文件原则上不存消息原文，
+ * 这里破例，是因为这些内容本来就是要公开上链的；而私钥/助记词在进到这里
+ * 之前已经被 scanForSecrets 拦掉了。
  */
-const evidenceSkipKeyboard = (method, deal, label) =>
-  keyboard([[btn(label, `noev:${method}:${deal}`)]]);
+function startEvidence(userId, deal, method) {
+  session.setFlow(userId, "evidence", { deal, method, items: [] });
+}
+
+/// 每一步都给按钮 —— 要用户敲字的地方，同时给一个点的地方。
+function evidenceKeyboard(method, deal, items) {
+  const rows = [];
+  if (items.length > 0) {
+    rows.push([btn(`📤 全部提交（${items.length} 条，签名 1 次）`, `evsub:${deal}`)]);
+    rows.push([btn("🗑 清空重来", `evclr:${deal}`)]);
+  } else if (method !== "submitEvidence") {
+    rows.push([btn(method === "markDelivered" ? "没有凭证，直接标记已交付" : "不附证据，直接提起争议",
+      `noev:${method}:${deal}`)]);
+  }
+  return rows.length ? keyboard(rows) : {};
+}
 
 /// 按钮跳过证据。校验重做一遍 —— callback_data 是客户端发来的，
 /// 不能因为它是我们自己生成的按钮就当它可信。
@@ -819,39 +863,131 @@ export async function skipEvidence(chatId, userId, method, dealAddr) {
     await sendMessage(chatId, esc("这个操作已经失效，请重新 /deal 查看。"));
     return;
   }
-  await submitEvidence(chatId, userId, dealAddr, method, "");
-}
-
-async function submitEvidence(chatId, userId, deal, method, uri) {
-  await sendTxs(chatId, [buildAction(deal, method, [uri], EVIDENCE_LABELS[method])]);
+  await sendTxs(chatId, [buildAction(dealAddr, method, [""], EVIDENCE_LABELS[method])]);
   session.clearFlow(userId);
 }
 
-async function handleEvidenceInput(chatId, userId, text, { hasMedia = false } = {}) {
+/// 当前这个用户的证据篮，且必须对应按钮上的那笔交易。对不上说明按钮过期了。
+function currentBasket(userId, dealAddr) {
   const u = session.user(userId);
-  const { deal, method } = u.draft;
-  // 「提交证据」本身就是为了交东西，跳过没有意义；另外两步有跳过按钮
-  const allowSkip = method !== "submitEvidence";
-  const r = parseEvidenceInput(text, { hasMedia, allowSkip });
+  if (u.flow !== "evidence" || !u.draft?.deal) return null;
+  if (dealAddr && u.draft.deal.toLowerCase() !== String(dealAddr).toLowerCase()) return null;
+  u.draft.items ??= [];
+  return u.draft;
+}
 
-  if (!r.ok) {
-    await sendMessage(chatId, esc(REJECT_TEXT[r.reason]),
-      allowSkip ? evidenceSkipKeyboard(method, deal, `不附证据，直接${EVIDENCE_LABELS[method]}`) : {});
+const ITEM_NAME = { text: "文字", link: "链接", image: "图片" };
+
+async function replyBasket(chatId, draft, added) {
+  const n = draft.items.length;
+  await sendMessage(chatId, [
+    `✅ ${esc(`收到第 ${n} 条（${ITEM_NAME[added.type]}）`)}`,
+    esc(`现在一共：${summarizeItems(draft.items)}`),
+    "",
+    esc("还可以继续发。都发完了，点「全部提交」。"),
+  ].join("\n"), evidenceKeyboard(draft.method, draft.deal, draft.items));
+}
+
+async function addToBasket(chatId, userId, draft, item) {
+  const room = canAdd(draft.items, item.type);
+  if (!room.ok) {
+    await sendMessage(chatId, esc(REJECT_TEXT[room.reason]), evidenceKeyboard(draft.method, draft.deal, draft.items));
+    return false;
+  }
+  draft.items.push(item);
+  session.save();
+  await replyBasket(chatId, draft, item);
+  return true;
+}
+
+async function handleEvidenceInput(chatId, userId, text, { hasMedia = false, image = null } = {}) {
+  const draft = currentBasket(userId);
+  if (!draft) return;
+
+  if (image) {
+    const room = canAdd(draft.items, "image");
+    if (!room.ok) {
+      await sendMessage(chatId, esc(REJECT_TEXT[room.reason]), evidenceKeyboard(draft.method, draft.deal, draft.items));
+      return;
+    }
+    const r = await evstore.saveTelegramImage(userId, image);
+    if (!r.ok) {
+      await sendMessage(chatId, esc(REJECT_TEXT[r.reason]), evidenceKeyboard(draft.method, draft.deal, draft.items));
+      return;
+    }
+    if (!(await addToBasket(chatId, userId, draft, r.item))) return;
+    // 图片自带的说明文字也收下，作为紧跟着的一段文字
+    const cap = String(text ?? "").trim();
+    if (cap) {
+      const t = parseEvidenceInput(cap, { allowSkip: false });
+      if (t.ok && t.item) await addToBasket(chatId, userId, draft, t.item);
+    }
     return;
   }
 
-  // 文字证据先给他看一眼会写进去什么 —— 永久公开，写错了改不了
-  if (r.kind === "text") {
-    await sendMessage(chatId, [
-      "*下面这段文字会永久写进链上：*",
-      "",
-      esc(describeEvidence(r.uri).body),
-      "",
-      esc(`没问题就点下面的签名按钮。要改的话，别签，重新点一次「${EVIDENCE_LABELS[method]}」再发。`),
-    ].join("\n"));
+  // 篮子里已经有东西时，skip 不再是「跳过」，就是一个词
+  const allowSkip = draft.method !== "submitEvidence" && draft.items.length === 0;
+  const r = parseEvidenceInput(text, { hasMedia, allowSkip });
+  if (!r.ok) {
+    await sendMessage(chatId, esc(REJECT_TEXT[r.reason]), evidenceKeyboard(draft.method, draft.deal, draft.items));
+    return;
+  }
+  if (r.skip) return skipEvidence(chatId, userId, draft.method, draft.deal);
+  await addToBasket(chatId, userId, draft, r.item);
+}
+
+export async function clearBasket(chatId, userId, dealAddr) {
+  const draft = currentBasket(userId, dealAddr);
+  if (!draft) {
+    await sendMessage(chatId, esc("这一轮证据已经提交或者过期了。要继续补充，请在交易里点「提交证据」。"));
+    return;
+  }
+  draft.items = [];
+  session.save();
+  await sendMessage(chatId, esc("已清空。重新发吧。"), evidenceKeyboard(draft.method, draft.deal, []));
+}
+
+/// 「全部提交」：先把要上链的内容完整摆给他看，再给签名按钮。
+export async function submitBasket(chatId, userId, dealAddr) {
+  const draft = currentBasket(userId, dealAddr);
+  if (!draft) {
+    await sendMessage(chatId, esc("这一轮证据已经提交或者过期了。要继续补充，请在交易里点「提交证据」。"));
+    return;
+  }
+  if (draft.items.length === 0) {
+    await sendMessage(chatId, esc("还没有内容。先发文字、链接或者图片。"), evidenceKeyboard(draft.method, draft.deal, []));
+    return;
   }
 
-  await submitEvidence(chatId, userId, deal, method, r.uri);
+  const u = session.user(userId);
+  const plan = planSubmission(draft.items);
+  let uri = plan.uri;
+  let viewer = null;
+  if (plan.kind === "bundle") {
+    if (!evstore.enabled()) {
+      await sendMessage(chatId, esc(REJECT_TEXT["store-off"]));
+      return;
+    }
+    const bundle = buildBundle({
+      deal: draft.deal, by: u.address, method: draft.method,
+      items: draft.items, createdAt: new Date().toISOString(),
+    });
+    uri = evstore.saveBundle(bundle);
+    viewer = evstore.viewerUrl(bundle.sha256);
+  }
+
+  const lines = [`*${esc(`你要提交的内容（${summarizeItems(draft.items)}）`)}*`, ""];
+  draft.items.forEach((it, i) => {
+    const body = it.type === "text" ? it.text : it.type === "link" ? `链接 ${it.url}` : `图片 ${i + 1}`;
+    const shown = [...body].length > 200 ? [...body].slice(0, 200).join("") + "……" : body;
+    lines.push(esc(`【${i + 1}】${shown}`));
+  });
+  if (viewer) lines.push("", `[${esc("👀 在网页上查看全部内容（含图片）")}](${viewer})`);
+  lines.push("", esc("⚠️ 签名后永久保存、公开给仲裁的人看，不能删改。没问题就点下面的签名按钮。"));
+  await sendMessage(chatId, lines.join("\n"));
+
+  await sendTxs(chatId, [buildAction(draft.deal, draft.method, [uri], EVIDENCE_LABELS[draft.method])]);
+  session.clearFlow(userId);
 }
 
 // ------------------------------------------------------------------ 流程分发

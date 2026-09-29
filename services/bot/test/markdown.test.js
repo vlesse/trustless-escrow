@@ -194,6 +194,28 @@ describe("真实消息的转义", () => {
     clean("stalled", watcher.describeStalled(deal, 25_000).text);
     for (const k of ["delivery", "inspection"]) clean("deadline/" + k, watcher.describeDeadline(deal, k, 5400).text);
   });
+
+  test("争议各阶段", () => {
+    const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    const deal = { address: A, buyer: A, seller: B, token: A, state: 4, feeBps: 100 };
+    const snap = {
+      status: 2, proposedRuling: 1, proposedAt: 1800000000, challengeDeadline: 1800172800, bond: U("50.5"),
+      phase: 4, juryRuling: 2, commitDeadline: 1800300000, revealDeadline: 1800400000,
+      appealDeadline: 1800500000, appealTotal: U("72.25"),
+    };
+    let n = 0;
+    for (const kind of ["proposed", "jury-pending", "commit", "reveal", "appealable"]) {
+      const msgs = watcher.describeArbitration(deal, snap, { kind, key: kind }, INFO);
+      assert.equal(msgs.length, 2, `${kind}：双方都要收到`);
+      for (const m of msgs) { clean(`arb:${kind}/${m.to}`, m.text); n++; }
+    }
+    assert.equal(n, 10);
+    // 对谁有利要说对：AI 判买家胜 → 卖家那条要有挑战的说明，买家那条不能有
+    const [b, s] = watcher.describeArbitration(deal, snap, { kind: "proposed" }, INFO);
+    assert.match(s.text, /发起挑战/);
+    assert.doesNotMatch(b.text, /发起挑战/);
+    assert.match(b.text, /对你有利/);
+  });
 });
 
 // ---------------------------------------------------------------------------

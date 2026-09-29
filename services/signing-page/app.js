@@ -37,6 +37,20 @@ const ESCROW_ABI = [
 const FACTORY_ABI = [
   "function createDeal(address token, address buyer, address seller, uint256 price, uint256 buyerBond, uint256 sellerBond, uint64 deliveryWindow, uint64 inspectionWindow, bytes32 termsHash) returns (address)",
   "function isDeal(address) view returns (bool)",
+  "function defaultArbitrator() view returns (address)",
+];
+
+/// 仲裁层上当事人能做的两件事。
+const OPTIMISTIC_ABI = ["function challenge(uint256 id)"];
+const JURY_ABI = ["function appeal(uint256 id)"];
+const OPT_READ_ABI = [
+  "function disputes(uint256 id) view returns (tuple(address arbitrable, address token, uint8 status, uint8 proposedRuling, uint64 proposedAt, uint64 createdAt, address challenger, uint256 bond, uint256 finalCost, uint256 value, address dealBuyer, address dealSeller))",
+  "function finalArbitrator() view returns (address)",
+  "function bondOf(address token) view returns (uint256)",
+];
+const JURY_READ_ABI = [
+  "function cases(uint256 id) view returns (tuple(address arbitrable, address feeToken, uint8 phase, uint8 ruling, uint64 drawBlock, uint64 commitDeadline, uint64 revealDeadline, uint64 appealDeadline, uint64 roundStartedAt, uint64 createdAt, uint64 rngRequestedAt, address rngSource, address dealBuyer, address dealSeller, uint256 value, uint256 baseCost))",
+  "function appealTotal(uint256 id) view returns (uint256)",
 ];
 const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -70,12 +84,24 @@ const ifaces = {
   identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
   reputation: new ethers.Interface(REPUTATION_ABI),
   merchantBond: new ethers.Interface(MERCHANT_BOND_ABI),
+  optimistic: new ethers.Interface(OPTIMISTIC_ABI),
+  jury: new ethers.Interface(JURY_ABI),
 };
 
 /// 每个操作的人话描述。`risk` 决定确认区的视觉强度。
 /// irreversible 的那几个必须说清楚「不可撤销」—— 这是用户最需要
 /// 在点下去之前知道的一件事。
 const ACTIONS = {
+  challenge: {
+    title: "挑战 AI 的初步裁决",
+    risk: "high",
+    note: "押上保证金，把案子交给陪审团重新判。陪审团判你对：押金退回，还能拿到对方押的那份；判你错：押金归对方。",
+  },
+  appeal: {
+    title: "上诉",
+    risk: "high",
+    note: "付上诉费，交给更多陪审员重新判。其中陪审员的报酬不退；拖延押金在改判时退还，维持原判时赔给对方。",
+  },
   approve: {
     title: "授权托管合约划转你的代币",
     risk: "medium",
@@ -124,7 +150,7 @@ const ACTIONS = {
   submitEvidence: {
     title: "提交证据",
     risk: "low",
-    note: "向仲裁层补充材料。只记录证据链接，不转移任何资金。",
+    note: "向仲裁层补充材料。不转移任何资金。",
   },
   createDeal: {
     title: "创建一笔担保交易",
@@ -309,6 +335,34 @@ async function runChecks(tx, decoded, chain) {
           : configured
             ? `目标 ${tx.to} 不是配置的信誉合约 ${chain.reputation}`
             : "本页未配置信誉合约地址，无法验证目标，拒绝放行");
+    } else if (decoded.kind === "optimistic" || decoded.kind === "jury") {
+      /*
+       * 挑战 / 上诉。仲裁合约的地址从**工厂**读，不从链接里拿：
+       * 工厂地址写在本页的 config 里，是这一页唯一信任的锚点。
+       * 然后再确认这个案子确实挂在本协议的一笔交易名下。
+       */
+      const optAddr = await factory.defaultArbitrator();
+      const opt = new ethers.Contract(optAddr, OPT_READ_ABI, rpc);
+      const id = decoded.args[0];
+      if (decoded.kind === "optimistic") {
+        const ok = tx.to.toLowerCase() === optAddr.toLowerCase();
+        add(ok, "目标是本协议的仲裁层", ok ? tx.to : `目标 ${tx.to} 不是工厂登记的仲裁层 ${optAddr}，请勿签名`);
+        if (ok) {
+          const d = await opt.disputes(id);
+          const isDeal = await factory.isDeal(d.arbitrable);
+          add(isDeal, "这个争议属于本协议的一笔交易",
+            isDeal ? d.arbitrable : "这个争议编号不对应本协议的任何交易");
+        }
+      } else {
+        const juryAddr = await opt.finalArbitrator();
+        const ok = tx.to.toLowerCase() === juryAddr.toLowerCase();
+        add(ok, "目标是本协议的陪审团", ok ? tx.to : `目标 ${tx.to} 不是本协议的陪审团 ${juryAddr}，请勿签名`);
+        if (ok) {
+          const c = await new ethers.Contract(juryAddr, JURY_READ_ABI, rpc).cases(id);
+          const mine = c.arbitrable.toLowerCase() === optAddr.toLowerCase();
+          add(mine, "这个案件是本协议仲裁层转来的", mine ? `案件 ${id}` : "这个案件不是本协议的");
+        }
+      }
     } else if (decoded.kind === "erc20" && decoded.name === "approve") {
       // approve 打给代币合约，所以要验的是被授权方（spender）
       const spender = decoded.args[0];
@@ -316,12 +370,32 @@ async function runChecks(tx, decoded, chain) {
         && spender.toLowerCase() === chain.identityBond.toLowerCase();
       const toQuota = Boolean(chain.merchantBond)
         && spender.toLowerCase() === chain.merchantBond.toLowerCase();
-      const ok = toBond || toQuota || (await factory.isDeal(spender));
+      // 挑战要把押金授权给仲裁层，上诉要把上诉费授权给陪审团。两个地址都从工厂现读。
+      const optAddr = await factory.defaultArbitrator();
+      const opt = new ethers.Contract(optAddr, OPT_READ_ABI, rpc);
+      const toOpt = spender.toLowerCase() === optAddr.toLowerCase();
+      const juryAddr = toOpt ? null : await opt.finalArbitrator().catch(() => null);
+      const toJury = Boolean(juryAddr) && spender.toLowerCase() === juryAddr.toLowerCase();
+      state.approveTarget = toOpt ? "optimistic" : toJury ? "jury" : null;
+
+      const ok = toBond || toQuota || toOpt || toJury || (await factory.isDeal(spender));
       add(ok,
         toBond ? "被授权方是配置里的身份押金合约"
           : toQuota ? "被授权方是配置里的商家额度池"
-            : "被授权方是工厂登记的托管合约",
+            : toOpt ? "被授权方是本协议的仲裁层"
+              : toJury ? "被授权方是本协议的陪审团"
+                : "被授权方是工厂登记的托管合约",
         ok ? spender : `被授权方 ${spender} 不是本协议的合约。签下去等于把代币划转权交给一个陌生合约。`);
+
+      if (toOpt) {
+        // 挑战押金是仲裁层上按币种写死的数，可以精确对照
+        const bond = await opt.bondOf(tx.to);
+        const fits = decoded.args[1] <= bond;
+        add(fits, "授权额度不超过挑战押金",
+          fits ? "额度与挑战押金一致" : `授权额度超过了挑战押金（${bond}）`);
+      } else if (toJury) {
+        add(true, "授权额度检查", "上诉费按案件计算，下一步签名页会核对你上诉的是本协议的案件");
+      }
 
       // 无限授权在本协议里永远没有必要：每一步需要多少就授权多少。
       // 出现无限额度，说明这笔交易不是本机器人构造的。
@@ -338,7 +412,7 @@ async function runChecks(tx, decoded, chain) {
       }
 
       // 授权额度不应超过该笔交易实际需要的金额
-      if (ok && !toBond && !toQuota) {
+      if (ok && !toBond && !toQuota && !toOpt && !toJury) {
         try {
           const deal = new ethers.Contract(spender, DEAL_READ_ABI, rpc);
           const [price, bb, sb] = await Promise.all([deal.price(), deal.buyerBond(), deal.sellerBond()]);
@@ -361,6 +435,44 @@ async function runChecks(tx, decoded, chain) {
 }
 
 // ---------------------------------------------------------------- 渲染
+
+/*
+ * 带证据的三种操作，签之前把要写进链上的内容原样摆出来。
+ *
+ * 证据一旦上链就永久公开、不能删改。原来这里只显示「提交证据」四个字，
+ * 用户签的是什么内容，页面上看不到 —— 文字证据存在链上是一串 base64，
+ * 不解码等于没显示。
+ */
+const EVIDENCE_METHODS = ["markDelivered", "raiseDispute", "submitEvidence"];
+
+function showEvidence(uri) {
+  const body = $("evidence-body");
+  body.textContent = "";
+  if (!uri) {
+    body.textContent = "（不附任何内容）";
+  } else {
+    const text = uri.match(/^data:text\/plain[^,]*;base64,(.*)$/i);
+    const bundle = uri.match(/^(https:\/\/[^/]+)\/evidence\/([0-9a-f]{64})\.json$/);
+    if (text) {
+      try {
+        body.textContent = new TextDecoder().decode(Uint8Array.from(atob(text[1]), (c) => c.charCodeAt(0)));
+      } catch {
+        body.textContent = uri;
+      }
+    } else if (bundle && bundle[1] === location.origin) {
+      // 我们自己存的证据包（带图片）。查看页会重算哈希核对，所以放心给链接。
+      const a = document.createElement("a");
+      a.href = `evidence.html#${bundle[2]}`;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "一个证据包（文字 + 图片）—— 点这里先看一遍";
+      body.appendChild(a);
+    } else {
+      body.textContent = "链接：" + uri;
+    }
+  }
+  $("evidence-box").hidden = false;
+}
 
 function riskClass(risk) {
   return { low: "risk-low", medium: "risk-medium", high: "risk-high", irreversible: "risk-irreversible" }[risk] ?? "risk-medium";
@@ -414,6 +526,18 @@ function render() {
         title: "授权身份押金合约划转你的代币",
         note: "这一步本身不转账，只是允许身份押金合约在下一步划走指定额度。额度只给本次所需，不是无限授权。",
       };
+    } else if (state.approveTarget === "optimistic") {
+      action = {
+        ...action,
+        title: "授权仲裁层划走挑战押金",
+        note: "这一步本身不转账，只是允许仲裁层在下一步划走挑战押金。额度只给这一次，不是无限授权。",
+      };
+    } else if (state.approveTarget === "jury") {
+      action = {
+        ...action,
+        title: "授权陪审团划走上诉费",
+        note: "这一步本身不转账，只是允许陪审团在下一步划走上诉费。额度只给这一次，不是无限授权。",
+      };
     } else if (chain.merchantBond && spender === chain.merchantBond.toLowerCase()) {
       action = {
         ...action,
@@ -434,6 +558,7 @@ function render() {
     b.hidden = false;
   }
   $("action-note").textContent = action?.note ?? "本页面无法解读这笔交易的含义。请勿签名。";
+  if (EVIDENCE_METHODS.includes(state.decoded?.name)) showEvidence(String(state.decoded.args[0] ?? ""));
   $("action-card").className = "card " + riskClass(action?.risk ?? "high");
 
   if (action?.risk === "irreversible") {

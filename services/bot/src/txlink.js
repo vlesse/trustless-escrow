@@ -49,6 +49,10 @@ export const MERCHANT_BOND_ABI = [
   "function fundDeal(address deal)",
 ];
 
+/// 仲裁层上当事人能做的两件事：不同意 AI 裁决就挑战，不同意陪审团结果就上诉。
+export const OPTIMISTIC_ABI = ["function challenge(uint256 id)"];
+export const JURY_ABI = ["function appeal(uint256 id)"];
+
 const ifaces = {
   factory: new ethers.Interface(FACTORY_ABI),
   escrow: new ethers.Interface(ESCROW_ABI),
@@ -56,6 +60,8 @@ const ifaces = {
   identityBond: new ethers.Interface(IDENTITY_BOND_ABI),
   reputation: new ethers.Interface(REPUTATION_ABI),
   merchantBond: new ethers.Interface(MERCHANT_BOND_ABI),
+  optimistic: new ethers.Interface(OPTIMISTIC_ABI),
+  jury: new ethers.Interface(JURY_ABI),
 };
 
 /**
@@ -158,6 +164,18 @@ export const buildQuotaWithdraw = (pool, amount) =>
 /// 这是额度池存在的意义：它替代了「授权 + 入金」那两笔，只剩一笔。
 export const buildFundDeal = (pool, deal) =>
   buildTx("merchantBond", pool, "fundDeal", [deal], "用额度支付保证金");
+
+/// 挑战 AI 裁决：先授权保证金给乐观层，再挑战。
+export const buildChallengeFlow = ({ token, opt, bond, disputeId }) => [
+  buildApprove(token, opt, bond),
+  buildTx("optimistic", opt, "challenge", [disputeId], "挑战 AI 的裁决"),
+];
+
+/// 上诉：先授权上诉费（含拖延押金）给陪审团，再上诉。
+export const buildAppealFlow = ({ token, jury, total, caseId }) => [
+  buildApprove(token, jury, total),
+  buildTx("jury", jury, "appeal", [caseId], "上诉"),
+];
 
 export function buildCreateDeal(params) {
   return buildTx("factory", config.escrowFactory, "createDeal", [

@@ -66,6 +66,20 @@ export const setMyCommands = (commands) => call("setMyCommands", { commands });
 
 export const getMe = () => call("getMe");
 
+/// 文件在 Telegram 服务器上的路径。下载地址里带着机器人 token，
+/// 所以只能在服务器上用，绝不能把这个地址发给任何人。
+export const getFile = (fileId) => call("getFile", { file_id: fileId });
+
+export async function downloadFile(filePath, maxBytes) {
+  const res = await fetch(`https://api.telegram.org/file/bot${config.botToken}/${filePath}`);
+  if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+  const len = Number(res.headers.get("content-length") || 0);
+  if (len > maxBytes) throw Object.assign(new Error("文件过大"), { code: "TOO_BIG" });
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > maxBytes) throw Object.assign(new Error("文件过大"), { code: "TOO_BIG" });
+  return buf;
+}
+
 export const getChatMember = (chatId, userId) =>
   call("getChatMember", { chat_id: chatId, user_id: userId });
 

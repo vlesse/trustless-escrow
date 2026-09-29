@@ -5,7 +5,9 @@ import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAl
 import * as juryalert from "./juryalert.js";
 import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
-import { describeEvidence } from "./evidence.js";
+import { describeEvidence, summarizeItems } from "./evidence.js";
+import * as evstore from "./evidencestore.js";
+import { loadArbitration, arbitrationStage, favors, rulingText } from "./disputestatus.js";
 
 /// 链上事件推送。
 ///
@@ -163,11 +165,26 @@ export function card({ icon, title, deal, lines = [], youDo, notes = [] }) {
  * 可能是钓鱼网址）。太长就截断，全文在区块浏览器里。
  */
 const EVIDENCE_SHOW_MAX = 300;
-export function evidenceLines(uri, label, fromOther = false) {
-  const e = describeEvidence(uri);
+export function evidenceLines(uri, label, fromOther = false, { readBundle = evstore.readBundle } = {}) {
+  const e = describeEvidence(uri, { bundleBase: config.evidenceBaseUrl });
   if (e.kind === "none") return [esc(`${label}：（没有附）`)];
   const cut = (t) => ([...t].length > EVIDENCE_SHOW_MAX ? [...t].slice(0, EVIDENCE_SHOW_MAX).join("") + "……" : t);
   if (e.kind === "text") return [esc(`${label}：「${cut(e.body)}」`)];
+
+  // 证据包（带图片的那种）：Telegram 里摆不下图片，给个概括 + 网页链接。
+  // 链接指向我们自己的查看页，它会重算哈希核对内容，所以可以做成可点的。
+  if (e.kind === "bundle") {
+    const b = readBundle(e.sha256);
+    const view = `[${esc("👀 点这里查看全部（含图片）")}](${evstore.viewerUrl(e.sha256)})`;
+    if (!b) return [esc(`${label}：一个证据包`), view];
+    const texts = b.items.filter((i) => i.type === "text").map((i) => i.text);
+    return [
+      esc(`${label}：${summarizeItems(b.items)}`),
+      ...texts.slice(0, 3).map((t) => esc(`「${cut(t)}」`)),
+      ...(texts.length > 3 ? [esc(`……还有 ${texts.length - 3} 段文字`)] : []),
+      view,
+    ];
+  }
   const warn = fromOther ? "，是对方给的，打开前确认是正常网址" : "";
   return [esc(`${label}（链接${warn}）：`), `\`${esc(cut(e.body))}\``];
 }
@@ -584,6 +601,95 @@ async function remindStalled(notify, deal, now) {
   await pushTo(notify, deal, msg.to, msg.text);
 }
 
+/**
+ * 争议各阶段的推送。双方都收到；对谁有利、谁能做什么，按角色分开说。
+ *
+ * 原来提起争议之后，一直到最终裁决（最长一个多星期），机器人一条消息都不发。
+ */
+export function describeArbitration(deal, snap, stage, info) {
+  if (!stage) return [];
+  const both = (make) => ["buyer", "seller"].map((r) => ({ to: r, text: make(r) }));
+  const amtOf = (x) => fmtAmount(x, info);
+
+  switch (stage.kind) {
+    case "proposed":
+      return both((r) => {
+        const good = favors(snap.proposedRuling) === r;
+        return card({
+          icon: "🤖", title: `AI 初步裁决：${rulingText(snap.proposedRuling)}`, deal,
+          lines: [esc(`这是 AI 根据双方交的证据给出的初步结果，对你${good ? "有利" : "不利"}。`)],
+          youDo: good
+            ? "什么都不用做。截止前没人挑战，这个结果就生效，钱自动分配。"
+            : `不同意的话，在截止前点下面的「不同意，发起挑战」。要押 ${amtOf(snap.bond)}，案子交给陪审团重新判。`,
+          notes: good
+            ? [`⏰ 挑战截止：${when(snap.challengeDeadline)}`,
+               esc("对方如果挑战，案子会交给陪审团重新判，到时我会通知你。")]
+            : [`⏰ 挑战截止：${when(snap.challengeDeadline)}`,
+               esc("陪审团判你对：押金退回，还能拿到对方押的那份。判你错：押金归对方。"),
+               esc("截止前没人挑战，这个结果就生效。")],
+        });
+      });
+
+    case "jury-pending":
+      return both(() => card({
+        icon: "👥", title: "有人不同意 AI 的裁决，案子交给陪审团了", deal,
+        youDo: "什么都不用做。正在抽选陪审员，一般几分钟内完成。",
+        notes: [esc("这段时间还可以继续「提交证据」，陪审员都会看到。")],
+      }));
+
+    case "commit":
+      return both(() => card({
+        icon: "🗳", title: "陪审员选好了，正在投票", deal,
+        lines: [esc("投票是密封的：截止前谁也看不到别人投了什么，所以没法跟风，也没法被收买后验货。")],
+        youDo: "什么都不用做。还有证据可以继续交。",
+        notes: [`⏰ 投票截止：${when(snap.commitDeadline)}`,
+                esc("之后还有两步：公开选票（2 天）、上诉期（2 天）。")],
+      }));
+
+    case "reveal":
+      return both(() => card({
+        icon: "📬", title: "投票结束，正在公开选票", deal,
+        youDo: "什么都不用做。选票公开完就出结果。",
+        notes: [`⏰ 公开截止：${when(snap.revealDeadline)}`],
+      }));
+
+    case "appealable":
+      return both((r) => {
+        const good = favors(snap.juryRuling) === r;
+        return card({
+          icon: "⚖️", title: `陪审团结果：${rulingText(snap.juryRuling)}`, deal,
+          lines: [esc(`这个结果对你${good ? "有利" : "不利"}。`)],
+          youDo: good
+            ? "什么都不用做。上诉期内没人上诉，这就是最终结果，钱自动分配。"
+            : `不同意的话，在截止前点下面的「不同意，提起上诉」。要付 ${amtOf(snap.appealTotal ?? 0n)}，交给更多陪审员重新判。`,
+          notes: good
+            ? [`⏰ 上诉截止：${when(snap.appealDeadline)}`]
+            : [`⏰ 上诉截止：${when(snap.appealDeadline)}`,
+               esc("这笔钱里一部分是陪审员的报酬，不退；另一部分是拖延押金：改判就退还，维持原判就赔给对方。"),
+               esc("截止前没人上诉，这就是最终结果。")],
+        });
+      });
+
+    default:
+      return [];
+  }
+}
+
+async function remindArbitration(notify, deal) {
+  const snap = deal.arb ?? await loadArbitration(deal, provider).catch((e) => {
+    console.error("读仲裁状态失败:", deal.address, e.message);
+    return null;
+  });
+  const stage = arbitrationStage(snap);
+  if (!stage) return;
+  if (session.alreadyNotified(`arb:${deal.address}:${stage.key}`)) return;
+  const info = await tokenInfo(deal.token, provider);
+  const withArb = { ...deal, arb: snap };   // 按钮（挑战/上诉）要按这份快照算
+  for (const m of describeArbitration(withArb, snap, stage, info)) {
+    await pushTo(notify, withArb, m.to, m.text);
+  }
+}
+
 async function checkDeadlines(notify, tracked) {
   const now = Math.floor(Date.now() / 1000);
 
@@ -599,6 +705,11 @@ async function checkDeadlines(notify, tracked) {
     if (deal.state === State.Open) {
       await remindApprovedOnly(notify, deal, now);
       await remindStalled(notify, deal, now);
+      continue;
+    }
+
+    if (deal.state === State.Disputed) {
+      await remindArbitration(notify, deal);
       continue;
     }
 

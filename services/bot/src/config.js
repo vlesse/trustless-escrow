@@ -64,6 +64,13 @@ export const config = {
   /// 商家额度池（可选）。不配置则整个额度功能静默关闭，担保交易不受影响。
   merchantBond: optAddr("MERCHANT_BOND"),
 
+  /// 证据图片和证据包存在哪、对外是什么地址。两个都配了才能收图片；
+  /// 不配的话提交证据只收文字和链接（会直接告诉用户）。
+  evidenceDir: process.env.EVIDENCE_DIR ?? "",
+  evidenceBaseUrl: (process.env.EVIDENCE_BASE_URL ?? "").replace(/\/$/, ""),
+  /// 证据存储总上限。到了就不再收图（文字、链接不受影响），而不是把硬盘写满拖垮整台机器。
+  evidenceMaxBytes: num("EVIDENCE_MAX_BYTES", 2 * 1024 ** 3),
+
   /// 测试网结算币。配了之后 /new 不再让用户手贴地址。
   settlementToken: optAddr("SETTLEMENT_TOKEN"),
 

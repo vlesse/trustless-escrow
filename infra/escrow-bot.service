@@ -19,7 +19,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/srv/escrow/services/bot /srv/escrow/logs
+# evidence-store：证据图片和证据包。只多开这一个目录的写权限。
+ReadWritePaths=/srv/escrow/services/bot /srv/escrow/logs /srv/escrow/evidence-store
 
 [Install]
 WantedBy=multi-user.target
