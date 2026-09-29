@@ -66,6 +66,10 @@ describe("陪审团上诉轮", function () {
     factory = await (await ethers.getContractFactory("EscrowFactory")).deploy(
       await impl.getAddress(), await jury.getAddress(), await vault.getAddress(), FEE_BPS, owner.address
     );
+    // 陪审团只受理工厂登记过的托管实例（以及乐观层）发起的案件。
+    // 不登记的话任何人都能开假案，抽选时锁住真陪审员，再在揭示期结束后
+    // 立刻计票，把不知情而没揭示的人当装死罚没。
+    await jury.setFactory(await factory.getAddress());
 
     for (const s of [buyer, seller, outsider, ...jurorSigners]) {
       await token.mint(s.address, U(100000));
@@ -247,11 +251,11 @@ describe("陪审团上诉轮", function () {
 
     it("拖延押金随案值走，与陪审团开几个人无关", async function () {
       // 它补偿的是「对方的钱被多锁了一个轮次」，那个损失取决于压了多少钱。
-      const small = await (await ethers.getContractFactory("EscrowFactory")).deploy(
-        await (await ethers.getContractFactory("Escrow")).deploy().then((x) => x.getAddress()),
-        await jury.getAddress(), await vault.getAddress(), FEE_BPS, owner.address
-      );
-      const rc = await (await small.connect(seller).createDeal(
+      //
+      // 用现有工厂开一笔小额单即可。原来这里另开了一个工厂共用同一个陪审团，
+      // 而 setFactory 只能设一次 —— 一个陪审团只服务一个工厂，是调用方校验
+      // 带来的约束。这个测试要的只是「金额不同」，不需要另一个工厂。
+      const rc = await (await factory.connect(seller).createDeal(
         await token.getAddress(), buyer.address, seller.address,
         U(100), U(100), U(100), 3 * 24 * 3600, 2 * 24 * 3600, ethers.ZeroHash
       )).wait();
@@ -529,6 +533,7 @@ describe("陪审团上诉轮", function () {
       const f2 = await (await ethers.getContractFactory("EscrowFactory")).deploy(
         await impl.getAddress(), await tiny.getAddress(), await vault.getAddress(), FEE_BPS, owner.address
       );
+      await tiny.setFactory(await f2.getAddress());
       const j0 = jurorSigners[0];
       await token.connect(j0).approve(await tiny.getAddress(), U(100000));
       await tiny.connect(j0).stake(STAKE_PER_VOTE);

@@ -41,6 +41,10 @@ describe("商家额度池", function () {
     factory = await (await ethers.getContractFactory("EscrowFactory")).deploy(
       await impl.getAddress(), await jury.getAddress(), await vault.getAddress(), FEE_BPS, owner.address
     );
+    // 陪审团只受理工厂登记过的托管实例（以及乐观层）发起的案件。
+    // 不登记的话任何人都能开假案，抽选时锁住真陪审员，再在揭示期结束后
+    // 立刻计票，把不知情而没揭示的人当装死罚没。
+    await jury.setFactory(await factory.getAddress());
     pool = await (await ethers.getContractFactory("MerchantBond")).deploy(
       await token.getAddress(), await factory.getAddress()
     );

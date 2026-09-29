@@ -27,6 +27,10 @@ describe("陪审团抽选的随机数", function () {
       await token.getAddress(), JURY_SIZE, MIN_STAKE, STAKE_PER_VOTE, owner.address
     );
     await jury.setCost(await token.getAddress(), JURY_COST);
+    // 本文件用一个签名者冒充上层仲裁方直接开案，所以把它登记成 upstream。
+    // 不登记会被 NotAllowedCaller 挡下 —— 那道校验正是为了防止任何人
+    // 开假案锁住真陪审员，再在揭示期后计票把他们当装死罚没。
+    await jury.setUpstream(arbitrable.address);
 
     for (const j of jurorSigners) {
       await token.mint(j.address, U(100000));

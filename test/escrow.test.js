@@ -345,6 +345,12 @@ describe("托管协议", function () {
       const originalFee = await deal.feeBps();
 
       const newVault = await (await ethers.getContractFactory("FeeVault")).deploy(outsider.address);
+
+      // 先交付再等时间锁。交付期届满之后 markDelivered 会被 TooLate 挡下 ——
+      // 那道校验是为了防止恶意卖家盯着买家的退款交易抢跑，把「无过错全额退款」
+      // 改成强制争议。本用例考的是配置快照，不该顺带依赖那个已经被堵上的口子。
+      await deal.connect(seller).markDelivered("x");
+
       await factory.proposeConfig(await arb.getAddress(), await newVault.getAddress(), 100);
       await time.increase(7 * 24 * 3600 + 1);
       await factory.applyConfig();
@@ -352,8 +358,7 @@ describe("托管协议", function () {
       expect(await deal.feeVault()).to.equal(originalVault, "已存在的交易参数不可被事后更改");
       expect(await deal.feeBps()).to.equal(originalFee);
 
-      // 并且实际结算仍按原费率走向原金库
-      await deal.connect(seller).markDelivered("x");
+      // 并且实际结算仍按原费率走向原金库。买家随时可以主动放款，验收期已过也一样。
       const b0 = await balances();
       await deal.connect(buyer).confirmReceipt();
       expect((await balances()).vault - b0.vault).to.equal(FEE);

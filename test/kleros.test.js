@@ -98,25 +98,36 @@ describe("Kleros 适配器", function () {
         .to.equal(KLEROS_COST);
     });
 
-    it("没配报价的币种一律拒绝，而不是白白烧掉 ETH", async function () {
+    it("没配报价的币种，钱根本锁不进去 —— 拦在入金而不是拦在打官司", async function () {
       await fund(E(1));
       const t2 = await (await ethers.getContractFactory("MockERC20")).deploy();
       for (const a of [seller, buyer]) await t2.mint(a.address, U(10000));
       const deal = await openDeal(await t2.getAddress());
+
+      /*
+       * 这里曾经是反过来的：入金只读报价、不发起争议，所以双方能顺利锁钱，
+       * 直到真要打官司时才卡住。那条路的终点是：买家提不了争议，45 天兜底
+       * 也永远不会开火，剩下的唯一出口就是把货款给卖家 —— 等于钱被没收。
+       *
+       * 所以现在拦在激活这一步。没有可用的仲裁入口，这笔交易就不该成立。
+       */
       await t2.connect(seller).approve(await deal.getAddress(), BOND);
       await deal.connect(seller).depositSeller();
       await t2.connect(buyer).approve(await deal.getAddress(), PRICE + BOND);
-      await deal.connect(buyer).depositBuyer();
-      await deal.connect(seller).markDelivered("ipfs://x");
 
-      // 拦在提起争议这一步（入金时只读报价、不发起争议，所以那时候不会失败）。
-      // 这条边界值得留意：币种没配报价，双方是可以正常入金并完成交易的，
-      // 只有真要打官司时才会卡住。
       const ethBefore = await ethers.provider.getBalance(await adapter.getAddress());
-      await expect(deal.connect(buyer).raiseDispute("ipfs://e"))
-        .to.be.revertedWithCustomError(adapter, "CostNotConfigured");
+      await expect(deal.connect(buyer).depositBuyer())
+        .to.be.revertedWithCustomError(deal, "ArbitrationUnconfigured");
+
+      expect(await deal.state()).to.not.equal(2, "不该进入 Funded");
+      expect(await t2.balanceOf(await deal.getAddress())).to.equal(BOND,
+        "买家的钱一分都不该进去；卖家那份押金还能原路取回");
       expect(await ethers.provider.getBalance(await adapter.getAddress()))
-        .to.equal(ethBefore, "失败的请求不该花掉任何 ETH");
+        .to.equal(ethBefore, "失败的路径不该花掉任何 ETH");
+
+      // 卖家能把自己那份拿回来 —— 未完全入金时任一方都可无损退出
+      await deal.connect(seller).cancelUnfunded();
+      expect(await t2.balanceOf(await deal.getAddress())).to.equal(0n);
     });
   });
 

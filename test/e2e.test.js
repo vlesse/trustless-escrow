@@ -52,6 +52,11 @@ describe("全链路集成", function () {
     optimistic = await (await ethers.getContractFactory("OptimisticArbitrator")).deploy(
       await factory.getAddress(), await jury.getAddress(), proposer.address, owner.address
     );
+    // 陪审团只受理工厂登记过的托管实例（以及乐观层）发起的案件。
+    // 不登记的话任何人都能开假案，抽选时锁住真陪审员，再在揭示期结束后
+    // 立刻计票，把不知情而没揭示的人当装死罚没。
+    await jury.setFactory(await factory.getAddress());
+    await jury.setUpstream(await optimistic.getAddress());
     expect(await optimistic.getAddress()).to.equal(predicted, "地址预测应命中");
 
     await optimistic.setCost(await token.getAddress(), OPT_COST, CHAL_BOND);
