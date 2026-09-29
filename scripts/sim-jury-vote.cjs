@@ -30,7 +30,24 @@ const PHASE_NAME = ["None", "Pending", "Commit", "Reveal", "Appealable", "Execut
 const commitment = (ruling, salt, juror) =>
   ethers.solidityPackedKeccak256(["uint8", "bytes32", "address"], [ruling, salt, juror]);
 
+/*
+ * 必须用 escrow 用户跑，不能用 root。
+ *
+ * 这个脚本写的状态文件（投票 salt、案件号）后面几天由定时任务接力读取，
+ * 而定时任务跑在 escrow 用户下。用 root 跑，文件就归 root、权限 600 ——
+ * 三天后揭示时读不到 salt，三席全被当成弃权、质押罚没，案子拖到超时以
+ * 「不判输赢」收场。实测差点就这样：投完票才发现文件是 root 的。
+ */
+function refuseRoot() {
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    console.error("不要用 root 跑这个脚本。请用：sudo -u escrow npx hardhat run ...");
+    console.error("（它写的状态文件要给 escrow 用户下的定时任务读，root 写的读不到）");
+    process.exit(1);
+  }
+}
+
 async function main() {
+  refuseRoot();
   const provider = ethers.provider;
   const st = JSON.parse(fs.readFileSync(STATE, "utf8"));
   const caseID = BigInt(st.juryCaseID);
