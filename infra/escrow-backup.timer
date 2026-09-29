@@ -1,0 +1,8 @@
+[Unit]
+Description=每天备份一次
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=600
+[Install]
+WantedBy=timers.target

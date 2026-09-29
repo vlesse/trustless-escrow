@@ -1,0 +1,7 @@
+[Unit]
+Description=Backup the escrow secrets that exist only on this machine
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/escrow-backup.sh
+StandardOutput=append:/srv/escrow/logs/backup.log
+StandardError=append:/srv/escrow/logs/backup.log
