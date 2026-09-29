@@ -254,6 +254,27 @@ describe("/deal 详情头", () => {
     assert.match(md, /手续费/);
     assert.match(md, /1\\?\.00%/);
   });
+
+  // 争议中的 /deal 多了一段「争议进度」，里面有截止时间（带 : 和 .）、括号、「·」
+  test("争议中各阶段没有漏转义，而且进度真的渲染出来了", () => {
+    const snaps = [
+      { status: 1 },
+      { status: 2, proposedRuling: 1, challengeDeadline: 1800100000 },
+      { status: 3, phase: 2, commitDeadline: 1800200000 },
+      { status: 3, phase: 3, revealDeadline: 1800300000 },
+      { status: 3, phase: 4, juryRuling: 2, appealDeadline: 1800400000 },
+      null,   // 快照读不到
+    ];
+    for (const arb of snaps) {
+      for (const role of ["buyer", "seller", null]) {
+        const md = cmds.renderDealHeader({ deal: { ...DEAL, state: 4, arb }, info: INFO, role }).join("\n");
+        const bad = unescapedReserved(md);
+        assert.deepEqual(bad, [], `arb=${JSON.stringify(arb)} role=${role}：` +
+          bad.map((b) => `「${b.ch}」在 …${b.near}…`).join("；"));
+        assert.match(md, arb ? /争议进度/ : /暂时读不到/);
+      }
+    }
+  });
 });
 
 /**

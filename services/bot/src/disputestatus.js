@@ -123,3 +123,70 @@ export function arbitrationActions(snap, role, now = Math.floor(Date.now() / 100
   }
   return out;
 }
+
+/**
+ * 「争议进度」：现在在哪一步、什么时候截止、接下来还有什么。给 /deal 用。
+ *
+ * 原来争议期间 /deal 只显示「争议中」三个字。真实用户在投票阶段去找
+ * 「上诉」按钮 —— 找不到，也没有任何地方告诉他那个按钮要到出结果之后、
+ * 而且只在结果对他不利时才会出现。流程这么长，每一步都得说清「接下来是什么」。
+ *
+ * @param fmt  截止时间 → 文字（调用方决定格式，这里不碰时区）
+ * @returns {{now: string, next: string[]} | null}  纯文本，调用方负责转义
+ */
+export function arbitrationProgress(snap, role, fmt) {
+  if (!snap) return null;
+  const mine = (ruling) => {
+    if (!role) return "";
+    return favors(ruling) === role ? "，对你有利" : "，对你不利";
+  };
+  const good = (ruling) => role && favors(ruling) === role;
+  const JURY_STEPS = "陪审团投票 3 天 → 公开选票 2 天 → 出结果 → 上诉期 2 天";
+
+  switch (snap.status) {
+    case OptStatus.Open:
+      return {
+        now: "等 AI 给出初步裁决",
+        next: ["AI 给出结果后，有 48 小时挑战期",
+               "没人挑战：按 AI 的结果分钱",
+               `有人挑战：交给陪审团（${JURY_STEPS}）`],
+      };
+    case OptStatus.Proposed:
+      return {
+        now: `AI 初步裁决：${rulingText(snap.proposedRuling)}${mine(snap.proposedRuling)}。挑战截止：${fmt(snap.challengeDeadline)}`,
+        next: good(snap.proposedRuling)
+          ? ["截止前没人挑战，就按这个结果分钱", `有人挑战的话，交给陪审团（${JURY_STEPS}）`]
+          : ["不同意的话，截止前点下面的「不同意，发起挑战」", "截止前没人挑战，就按这个结果分钱"],
+      };
+    case OptStatus.Escalated: {
+      const appealHint = role ? "结果对你不利的话，那时这里会出现「不同意，提起上诉」按钮" : null;
+      if (snap.phase === undefined || snap.phase === JuryPhase.Pending) {
+        return { now: "有人不同意 AI 的裁决，交给陪审团了，正在抽选陪审员", next: [JURY_STEPS] };
+      }
+      if (snap.phase === JuryPhase.Commit) {
+        return {
+          now: `陪审团投票中。投票截止：${fmt(snap.commitDeadline)}`,
+          next: ["公开选票（2 天）", "出结果，进入上诉期（2 天）", appealHint,
+                 "上诉期过了没人上诉，钱自动按结果分配"].filter(Boolean),
+        };
+      }
+      if (snap.phase === JuryPhase.Reveal) {
+        return {
+          now: `投票结束，正在公开选票。公开截止：${fmt(snap.revealDeadline)}`,
+          next: ["出结果，进入上诉期（2 天）", appealHint, "上诉期过了没人上诉，钱自动按结果分配"].filter(Boolean),
+        };
+      }
+      if (snap.phase === JuryPhase.Appealable) {
+        return {
+          now: `陪审团结果：${rulingText(snap.juryRuling)}${mine(snap.juryRuling)}。上诉截止：${fmt(snap.appealDeadline)}`,
+          next: good(snap.juryRuling) || !role
+            ? ["截止前没人上诉，钱自动按这个结果分配"]
+            : ["不同意的话，截止前点下面的「不同意，提起上诉」", "截止前没人上诉，钱自动按这个结果分配"],
+        };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}

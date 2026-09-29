@@ -224,6 +224,18 @@ export function untilText(deadlineSec, now = Math.floor(Date.now() / 1000)) {
   return `还剩 ${m} 分钟`;
 }
 
+/**
+ * 截止时间的北京时间写法。
+ *
+ * 原来后面跟的是 UTC。这个机器人的用户几乎都在东八区，看到 UTC 要自己
+ * 加八小时 —— 而这正是会算错、然后错过截止的那一步。
+ */
+export function cnTime(sec) {
+  const d = new Date((Number(sec) + 8 * 3600) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `北京时间 ${d.getUTCMonth() + 1}月${d.getUTCDate()}日 ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
 /// UTC 时刻，放在相对时间后面备查。写明 UTC，免得被当成本地时间。
 export const utcText = (sec) =>
   new Date(Number(sec) * 1000).toISOString().replace("T", " ").slice(0, 16) + " UTC";

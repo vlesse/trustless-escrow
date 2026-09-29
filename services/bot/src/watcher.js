@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 import { config } from "./config.js";
 import * as session from "./session.js";
-import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAllowance, fmtAmount, State, untilText } from "./deals.js";
+import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAllowance, fmtAmount, State, untilText, cnTime } from "./deals.js";
 import * as juryalert from "./juryalert.js";
 import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
@@ -103,17 +103,7 @@ const short = (a) => `${a.slice(0, 8)}…${a.slice(-6)}`;
 /// 地址放在 `` ` `` 代码块里，代码块内只需转义反引号与反斜杠，十六进制地址天然安全。
 const amt = (raw, info) => esc(fmtAmount(raw, info));
 
-/**
- * 截止时间：还剩多久 + 北京时间。
- *
- * 原来后面跟的是 UTC。这个机器人的用户几乎都在东八区，看到 UTC 要自己
- * 加八小时 —— 而这正是会算错、然后错过截止的那一步。
- */
-export function cnTime(sec) {
-  const d = new Date((Number(sec) + 8 * 3600) * 1000);
-  const p = (n) => String(n).padStart(2, "0");
-  return `北京时间 ${d.getUTCMonth() + 1}月${d.getUTCDate()}日 ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
-}
+export { cnTime };   // 实现挪到了 deals.js，/deal 和推送共用同一个
 const when = (sec) => esc(`${untilText(sec)}（${cnTime(sec)} 截止）`);
 
 /**

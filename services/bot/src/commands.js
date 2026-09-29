@@ -6,9 +6,10 @@ import * as rep from "./reputation.js";
 import { buildChallenge, newNonce, verifyBinding, CHALLENGE_TTL_MIN } from "./wallet.js";
 import {
   makeProvider, loadDeal, listDeals, roleOf, availableActions,
-  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt, untilText, utcText,
-  tokenBalance, tokenAllowance,
+  tokenInfo, fmtAmount, explorerAddr, hashTerms, STATE_NAME, State, factoryAt, untilText,
+  tokenBalance, tokenAllowance, cnTime,
 } from "./deals.js";
+import { arbitrationProgress } from "./disputestatus.js";
 import {
   buildCreateDeal, buildDepositFlow, buildAction, toSigningLink, toFlowLink, toMessageLink, toEip681, buildFundDeal,
   buildChallengeFlow, buildAppealFlow,
@@ -588,10 +589,23 @@ export function renderDealHeader({ deal, info, role, factoryArbitrator = null, l
     lines.push(`链上实锁: *${esc(fmtAmount(locked, info))}*`);
   }
 
+  // 截止时间一律「还剩多久 + 北京时间」，和推送保持一致
+  const due = (sec) => `${untilText(sec)}（${cnTime(sec)} 截止）`;
   if (deal.state === State.Funded) {
-    lines.push(`交付截止: ${esc(untilText(deal.deliveryDeadline))}（${esc(utcText(deal.deliveryDeadline))}）`);
+    lines.push(`交付截止: ${esc(due(deal.deliveryDeadline))}`);
   } else if (deal.state === State.Delivered) {
-    lines.push(`验收截止: ${esc(untilText(deal.inspectionDeadline))}（${esc(utcText(deal.inspectionDeadline))}）`);
+    lines.push(`验收截止: ${esc(due(deal.inspectionDeadline))}`);
+  }
+
+  // 争议期间：进行到哪了、接下来是什么、按钮什么时候出现
+  const progress = deal.state === State.Disputed ? arbitrationProgress(deal.arb, role, due) : null;
+  if (progress) {
+    lines.push("", "*争议进度*", esc(`现在：${progress.now}`));
+    if (progress.next.length) {
+      lines.push(esc("接下来："), ...progress.next.map((s) => esc(`· ${s}`)));
+    }
+  } else if (deal.state === State.Disputed) {
+    lines.push("", esc("争议进度暂时读不到，稍后再发一次 /deal 看看。"));
   }
 
   /*

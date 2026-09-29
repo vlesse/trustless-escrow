@@ -96,3 +96,59 @@ describe("挑战、上诉按钮只给结果对他不利的一方", () => {
     assert.equal(arbitrationActions(p0, "seller", 1000).length, 1);
   });
 });
+
+describe("/deal 里的争议进度", async () => {
+  const { arbitrationProgress } = await import("../src/disputestatus.js");
+  const fmt = (s) => `T${s}`;
+
+  /*
+   * 真实用户在投票阶段去找「上诉」按钮，找不到。按钮确实不该有 ——
+   * 要到出结果之后、而且结果对他不利才出现。但没有任何地方告诉他这件事。
+   */
+  test("投票阶段要说清：现在在投票、截止什么时候、上诉按钮什么时候出现", () => {
+    const p = arbitrationProgress({ status: OptStatus.Escalated, phase: JuryPhase.Commit, commitDeadline: 9 }, "buyer", fmt);
+    assert.match(p.now, /投票中/);
+    assert.match(p.now, /T9/);
+    const next = p.next.join("\n");
+    assert.match(next, /公开选票/);
+    assert.match(next, /上诉期/);
+    assert.match(next, /不利.*「不同意，提起上诉」按钮/);
+  });
+
+  test("结果出来后，对谁有利说清楚；按钮文字和真实按钮一致", () => {
+    const snap = { status: OptStatus.Escalated, phase: JuryPhase.Appealable, juryRuling: 2, appealDeadline: 7 };
+    const lose = arbitrationProgress(snap, "buyer", fmt);
+    const win = arbitrationProgress(snap, "seller", fmt);
+    assert.match(lose.now, /对你不利/);
+    assert.match(win.now, /对你有利/);
+    const btn = arbitrationActions({ ...snap, appealTotal: 1n }, "buyer", 0)[0].label;
+    assert.ok(lose.next.some((s) => s.includes(`「${btn}」`)), "说的按钮名字必须和真实按钮一模一样");
+    assert.ok(!win.next.some((s) => s.includes(btn)), "赢的一方不该被提示去上诉");
+  });
+
+  test("AI 裁决阶段：输的一方被指到挑战按钮，名字对得上", () => {
+    const snap = { status: OptStatus.Proposed, proposedRuling: 1, challengeDeadline: 5 };
+    const btn = arbitrationActions(snap, "seller", 0)[0].label;
+    assert.ok(arbitrationProgress(snap, "seller", fmt).next.some((s) => s.includes(`「${btn}」`)));
+  });
+
+  test("第三方（不是买卖双方）看不到「对你有利/不利」", () => {
+    const p = arbitrationProgress({ status: OptStatus.Proposed, proposedRuling: 1, challengeDeadline: 5 }, null, fmt);
+    assert.doesNotMatch(p.now, /对你/);
+  });
+
+  test("每个阶段都有「现在」和「接下来」，读不到快照时返回 null", () => {
+    for (const s of [
+      { status: OptStatus.Open },
+      { status: OptStatus.Proposed, proposedRuling: 1, challengeDeadline: 1 },
+      { status: OptStatus.Escalated },
+      { status: OptStatus.Escalated, phase: JuryPhase.Commit, commitDeadline: 1 },
+      { status: OptStatus.Escalated, phase: JuryPhase.Reveal, revealDeadline: 1 },
+      { status: OptStatus.Escalated, phase: JuryPhase.Appealable, juryRuling: 1, appealDeadline: 1 },
+    ]) {
+      const p = arbitrationProgress(s, "buyer", fmt);
+      assert.ok(p.now && p.next.length > 0, JSON.stringify(s));
+    }
+    assert.equal(arbitrationProgress(null, "buyer", fmt), null);
+  });
+});
