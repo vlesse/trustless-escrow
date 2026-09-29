@@ -477,6 +477,42 @@ function injectedProvider() {
   return window.ethereum;
 }
 
+/*
+ * 钱包迟迟不回话时，告诉用户去哪儿找。
+ *
+ * 小狐狸的确认窗口有时不会自己弹到前面（尤其是页面刚打开、不是用户点击
+ * 触发的请求），它只是挂在浏览器右上角的扩展图标上。用户看到的是：
+ * 按钮写着「连接中…」，点了没反应。实测真实用户就卡在这里。
+ */
+const WALLET_SLOW_MS = 12_000;
+const WALLET_SLOW_HINT = "钱包没有反应？点一下浏览器右上角的小狐狸图标，里面可能有一个窗口在等你确认。确认完回到这里。";
+
+function walletError(e) {
+  // ethers 会把钱包的原始错误包一层：外层 code 是 "UNKNOWN_ERROR"，
+  // 真正的 -32002 在 e.error 里。只看外层就认不出来 —— 实测就是这样漏的。
+  const layers = [e, e?.error, e?.info?.error, e?.error?.data?.originalError].filter(Boolean);
+  const codes = layers.map((x) => x.code);
+  const msg = layers.map((x) => String(x.shortMessage ?? x.message ?? "")).join(" | ");
+  if (codes.includes(4001) || codes.includes("ACTION_REJECTED") || /user rejected|denied/i.test(msg)) {
+    return "你在钱包里点了拒绝。要继续的话，再点一次「连接钱包」。";
+  }
+  if (codes.includes(-32002) || /already pending/i.test(msg)) {
+    return "小狐狸里已经有一个请求在等你处理。点浏览器右上角的小狐狸图标，处理完再回来点「连接钱包」。";
+  }
+  return "连接失败：" + msg;
+}
+
+/// 已经拿到账户、网络也对了之后，把页面切到「可以签名」。
+async function finishConnect(eth) {
+  state.provider = new ethers.BrowserProvider(eth);
+  state.signer = await state.provider.getSigner();
+  $("addr").textContent = await state.signer.getAddress();
+  $("connected").hidden = false;
+  $("connect").hidden = true;
+  $("sign").hidden = false;
+  $("status").textContent = "";
+}
+
 async function connect() {
   const eth = injectedProvider();
   if (!eth) {
@@ -487,6 +523,14 @@ async function connect() {
   const btn = $("connect");
   btn.disabled = true;
   btn.textContent = "连接中…";
+  $("status").textContent = "";
+
+  // 卡住时不能让按钮一直是灰的 —— 那就是「点了没反应」
+  const slow = setTimeout(() => {
+    $("status").textContent = WALLET_SLOW_HINT;
+    btn.disabled = false;
+    btn.textContent = "重新连接钱包";
+  }, WALLET_SLOW_MS);
 
   try {
     const bp = new ethers.BrowserProvider(eth);
@@ -514,17 +558,13 @@ async function connect() {
       }
     }
 
-    state.provider = new ethers.BrowserProvider(eth);
-    state.signer = await state.provider.getSigner();
-
-    $("addr").textContent = await state.signer.getAddress();
-    $("connected").hidden = false;
-    btn.hidden = true;
-    $("sign").hidden = false;
+    await finishConnect(eth);
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "连接钱包";
-    $("status").textContent = "连接失败：" + (e.shortMessage ?? e.message);
+    $("status").textContent = walletError(e);
+  } finally {
+    clearTimeout(slow);
   }
 }
 
@@ -577,12 +617,17 @@ async function sign() {
   btn.textContent = "请在钱包中确认…";
   $("status").textContent = "";
 
+  // 只提示、不恢复按钮：交易可能已经在钱包里等确认，再点一次就是两笔。
+  const slow = setTimeout(() => { $("status").textContent = WALLET_SLOW_HINT; }, WALLET_SLOW_MS);
+
   try {
     const sent = await state.signer.sendTransaction({
       to: state.tx.to,
       data: state.tx.data,
       value: state.tx.value,
     });
+    clearTimeout(slow);
+    $("status").textContent = "";
 
     $("result").hidden = false;
     $("txhash").textContent = sent.hash;
@@ -599,9 +644,10 @@ async function sign() {
   } catch (e) {
     btn.disabled = false;
     btn.textContent = "签名并发送";
+    clearTimeout(slow);
     const msg = e.shortMessage ?? e.message ?? String(e);
     $("status").textContent = /user rejected|ACTION_REJECTED/i.test(msg)
-      ? "你取消了签名。"
+      ? "你在钱包里点了拒绝，这笔没有发出去。要继续的话，再点一次上面的按钮。"
       : "失败：" + msg;
   }
 }
@@ -746,12 +792,8 @@ async function main() {
 
   render();
 
-  const amount = await describeAmount(state.decoded, state.chain);
-  if (amount) {
-    $("amount").textContent = amount;
-    $("amount-row").hidden = false;
-  }
-
+  // 按钮在 render() 之后就看得见了，事件必须同时绑上。原来是等读完金额
+  // 才绑 —— 公共节点一慢，用户看得见按钮、点了却没反应。
   $("connect").addEventListener("click", connect);
   $("sign").addEventListener("click", sign);
   $("toggle-raw").addEventListener("click", () => {
@@ -760,7 +802,17 @@ async function main() {
     $("toggle-raw").textContent = box.hidden ? "显示原始交易数据" : "隐藏原始交易数据";
   });
 
-  await autoConnect();
+  autoConnect();
+
+  // 金额只是展示，读不到不影响签名。限时，免得节点慢时一直挂着。
+  const amount = await Promise.race([
+    describeAmount(state.decoded, state.chain),
+    new Promise((r) => setTimeout(() => r(null), 10_000)),
+  ]);
+  if (amount) {
+    $("amount").textContent = amount;
+    $("amount-row").hidden = false;
+  }
 }
 
 /*
@@ -778,8 +830,23 @@ async function autoConnect() {
   const eth = injectedProvider();
   if (!eth) return;
   try {
-    const accounts = await eth.request({ method: "eth_accounts" });
-    if (Array.isArray(accounts) && accounts.length > 0) await connect();
+    /*
+     * 只用两个**不会弹窗**的查询：eth_accounts、eth_chainId。
+     *
+     * 第一版这里直接调 connect()，而 connect() 在网络不对时会请求切换网络。
+     * 不是用户点击触发的请求，小狐狸可能不弹窗、只挂在扩展图标上 ——
+     * 按钮于是一直停在「连接中…」被禁用，用户点了没反应。真实用户实测卡死。
+     *
+     * 所以：已授权**且**网络正确才自动连；其余情况什么都不做，
+     * 留给用户自己点按钮（用户点击触发的请求，钱包一定会弹窗）。
+     */
+    const [accounts, chainHex] = await Promise.all([
+      eth.request({ method: "eth_accounts" }),
+      eth.request({ method: "eth_chainId" }),
+    ]);
+    if (!Array.isArray(accounts) || accounts.length === 0) return;
+    if (Number(chainHex) !== state.tx.chainId) return;
+    await finishConnect(eth);
   } catch {
     // 自动连接失败就留给用户手动点，不报错
   }
