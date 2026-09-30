@@ -163,10 +163,19 @@ describe("操作可用性（合约状态机的镜像）", () => {
     assert.ok(ids(d, "seller").includes("deposit"));
   });
 
-  test("已锁定：卖家可标记交付，买家可提前放款", () => {
+  test("已锁定：卖家可标记交付，买家可提前放款；双方都能提出和解", () => {
     const d = { ...base, state: State.Funded, buyerFunded: true, sellerFunded: true };
-    assert.deepEqual(ids(d, "seller"), ["delivered"]);
-    assert.deepEqual(ids(d, "buyer"), ["confirm"]);
+    assert.deepEqual(ids(d, "seller"), ["delivered", "offer"]);
+    assert.deepEqual(ids(d, "buyer"), ["confirm", "offer"]);
+  });
+
+  /*
+   * 交付期过后合约不再接受「标记已交付」。原来按钮照给，卖家点下去签名，
+   * 只会得到一次失败 —— 还白付一次 gas。
+   */
+  test("交付期过后：卖家不再有「标记已交付」", () => {
+    const d = { ...base, state: State.Funded, buyerFunded: true, sellerFunded: true };
+    assert.ok(!ids(d, "seller", d.deliveryDeadline).includes("delivered"));
   });
 
   test("交付期过后：买家可索赔，卖家可提争议对抗", () => {
@@ -176,10 +185,10 @@ describe("操作可用性（合约状态机的镜像）", () => {
     assert.ok(ids(d, "seller", after).includes("dispute"));
   });
 
-  test("验收期内：只有买家能操作", () => {
+  test("验收期内：买家确认或争议；卖家只能提出和解（比如主动部分退款）", () => {
     const d = { ...base, state: State.Delivered, buyerFunded: true, sellerFunded: true };
-    assert.deepEqual(ids(d, "buyer").sort(), ["confirm", "dispute"]);
-    assert.deepEqual(ids(d, "seller"), [], "卖家在验收期内无事可做，等待即可");
+    assert.deepEqual(ids(d, "buyer").sort(), ["confirm", "dispute", "offer"]);
+    assert.deepEqual(ids(d, "seller"), ["offer"]);
   });
 
   test("验收期过后：任何一方都能推动结算", () => {
@@ -189,10 +198,28 @@ describe("操作可用性（合约状态机的镜像）", () => {
     assert.deepEqual(ids(d, "seller", after), ["settle"]);
   });
 
-  test("争议中：双方都只能补充证据", () => {
+  test("争议中：补充证据、认输、和解", () => {
     const d = { ...base, state: State.Disputed };
-    assert.deepEqual(ids(d, "buyer"), ["evidence"]);
-    assert.deepEqual(ids(d, "seller"), ["evidence"]);
+    assert.deepEqual(ids(d, "buyer"), ["evidence", "concede", "offer"]);
+    assert.deepEqual(ids(d, "seller"), ["evidence", "concede", "offer"]);
+  });
+
+  test("对方挂着和解方案：我能接受或还价；提方案的人能撤回，不能自己接受", () => {
+    const d = { ...base, state: State.Delivered, offerBy: base.seller, offerToBuyer: 1n };
+    assert.deepEqual(ids(d, "buyer").sort(), ["accept", "confirm", "dispute", "offer"]);
+    assert.equal(availableActions(d, "buyer", NOW).find((a) => a.id === "offer").label, "我要还价");
+    assert.deepEqual(ids(d, "seller").sort(), ["cancelOffer", "offer"]);
+    // 链上读回来的地址是校验和大小写，存的可能是全小写 —— 要认得出是同一个人，
+    // 否则提方案的人会看到「接受对方的方案」，点下去是在接受自己的
+    const S = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const mixed = { ...d, seller: S, offerBy: "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD" };
+    assert.ok(!ids(mixed, "seller").includes("accept"));
+    assert.ok(ids(mixed, "seller").includes("cancelOffer"));
+  });
+
+  test("验收期过后不再提和解（任何人都能直接结算给卖家了）", () => {
+    const d = { ...base, state: State.Delivered };
+    assert.ok(!ids(d, "buyer", d.inspectionDeadline + 1).includes("offer"));
   });
 
   test("终态无可用操作", () => {
@@ -456,6 +483,45 @@ describe("事件通知", () => {
     assert.match(lost, /证据包/);
     // 本文件的检查器不认链接语法，去掉链接再查其余部分（链接本身在 markdown.test.js 里查）
     assertValidMarkdownV2(lost.replace(/\[[^\]]*\]\([^)]*\)/g, ""), "bundle-lost");
+  });
+
+  /*
+   * 同一个和解方案，买家看到的「你拿到」必须是买家那份，卖家看到的必须是卖家那份。
+   * 说反了，就是让人签一个他以为对自己有利、其实相反的方案。
+   */
+  test("和解方案：「你拿到」按收件人的角色说，而且数字和公式一致", async () => {
+    const { settlementSplit, splitView } = await import("../src/split.js");
+    const d = { ...deal, state: 3, feeBps: 100, lockedArbCost: 0n };
+    const toBuyer = 700_000_000n;
+    const s = settlementSplit(splitView(d), toBuyer);
+    const msgs = describeEvent("SettlementOffered", { by: deal.seller, toBuyer }, d, info);
+    // 消息里的金额是 MarkdownV2 转义过的：700\.0
+    const fmt = (x) => (Number(x) / 1e6).toFixed(1).replace(".", "\\.");
+    const has = (to, who, v) => msgs.find((m) => m.to === to).text.includes(`你（${who}）拿到：*${fmt(v)} USDT*`);
+    assert.ok(has("buyer", "买家", s.toBuyer), "买家看到的必须是买家那份");
+    assert.ok(has("seller", "卖家", s.toSeller), "卖家看到的必须是卖家那份");
+    assert.match(msgs.find((m) => m.to === "buyer").text, /对方提出和解/);
+    assert.match(msgs.find((m) => m.to === "seller").text, /已经发给对方/);
+  });
+
+  test("交易已经结束时，「方案作废」不再单独推送（紧跟的结束消息会说）", () => {
+    assert.deepEqual(describeEvent("SettlementOfferCleared", { by: deal.buyer }, { ...deal, state: 5 }, info), []);
+    assert.equal(describeEvent("SettlementOfferCleared", { by: deal.buyer }, { ...deal, state: 4 }, info).length, 2);
+  });
+
+  test("结束消息的标题按结局区分：和解 / 争议 / 正常成交", () => {
+    const args = { finalState: 5n, toBuyer: 1n, toSeller: 1n, toArbitrator: 0n, fee: 0n };
+    const title = (outcome) => describeEvent("Settled", args, { ...deal, outcome }, info)[0].text.split("\n")[0];
+    assert.match(title(8), /和解/);
+    assert.match(title(4), /争议结束/);
+    assert.match(title(3), /交易完成/);
+  });
+
+  test("Telegram 按钮数据不能超过 64 字节", () => {
+    for (const data of ["offpct:100", `act:cancelOffer:${deal.address}`, `act:accept:${deal.address}`,
+                        `act:concede:${deal.address}`, `evsub:${deal.address}`, `noev:raiseDispute:${deal.address}`]) {
+      assert.ok(Buffer.byteLength(data) <= 64, `${data} 有 ${Buffer.byteLength(data)} 字节`);
+    }
   });
 
   test("对方给的链接要提醒小心，自己的不用", () => {

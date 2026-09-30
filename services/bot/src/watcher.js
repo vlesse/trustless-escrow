@@ -6,6 +6,7 @@ import * as juryalert from "./juryalert.js";
 import { esc, keyboard, btn } from "./telegram.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
 import { describeEvidence, summarizeItems } from "./evidence.js";
+import { settlementSplit, refundOf, splitView, splitLines } from "./split.js";
 import * as evstore from "./evidencestore.js";
 import { loadArbitration, arbitrationStage, favors, rulingText } from "./disputestatus.js";
 
@@ -33,6 +34,9 @@ const ESCROW_EVENTS = [
   // 原来漏了这一个。用户提交证据、签完，机器人一声不吭 —— 实测他以为没成功，
   // 又交了一遍，链上于是有了两份一样的证据、多付一次 gas。
   "event Evidence(address indexed by, string evidenceURI)",
+  "event Conceded(address indexed by)",
+  "event SettlementOffered(address indexed by, uint256 toBuyer)",
+  "event SettlementOfferCleared(address indexed by)",
   "event Ruled(uint256 indexed disputeID, uint256 ruling)",
   "event Settled(uint8 finalState, uint256 toBuyer, uint256 toSeller, uint256 toArbitrator, uint256 fee)",
 ];
@@ -299,13 +303,58 @@ export function describeEvent(name, args, deal, info) {
       }));
     }
 
+    case "SettlementOffered": {
+      const by = args.by.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
+      // 用事件里的金额，不用 deal 上当前挂着的 —— 处理到这条事件时，
+      // 提议可能已经被改过一次了，那一次会有自己的事件
+      const v = splitView(deal);
+      const s = settlementSplit(v, args.toBuyer);
+      if (!s) return [];
+      const refund = refundOf(v, args.toBuyer);
+      const head = refund !== null ? [esc(`方案：货款退给买家 ${fmtAmount(refund, info)}`), ""] : [];
+      return both((r) => card({
+        icon: "🤝",
+        title: r === by ? "你的和解方案已经发给对方了" : "对方提出和解",
+        deal,
+        lines: [...head, ...splitLines(s, r, info)],
+        youDo: r === by
+          ? "等对方回应。对方同意就立刻结算；想改就再提一次。"
+          : "同意就点下面的「接受对方的和解方案」，立刻结算；不同意可以点「我要还价」。",
+        notes: r === by ? [] : [esc("不理会也可以，交易会照原来的流程继续走。")],
+      }));
+    }
+
+    case "SettlementOfferCleared":
+      // 交易已经结束的话，紧跟着的「交易结束」那条会说清楚，这里不再多嘴
+      if (deal.state === State.Resolved || deal.state === State.Cancelled) return [];
+      return both(() => card({
+        icon: "↩️", title: "之前的和解方案已撤回或作废", deal,
+        lines: [esc("撤回了，或者起了争议（可分的钱少了一份仲裁费，之前谈的数要重谈）。")],
+        youDo: "想和解的话，重新点「提出和解」。",
+      }));
+
+    case "Conceded": {
+      const by = args.by.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
+      return both((r) => card({
+        icon: "🏳️", title: r === by ? "你已认输" : "对方认输了", deal,
+        youDo: r === by
+          ? "什么都不用做。钱马上按对方胜诉分配。"
+          : "什么都不用做。按你胜诉结算，钱马上到你钱包（看下一条消息）。",
+      }));
+    }
+
     case "Settled": {
       const cancelled = Number(args.finalState) === State.Cancelled;
+      // 结局决定标题：和解、争议、正常成交，对用户是三件不同的事
+      const title = cancelled ? "交易已取消，钱已退回"
+        : deal.outcome === 8 ? "按和解方案结束了"
+          : deal.outcome === 4 || deal.outcome === 5 ? "争议结束了"
+            : "交易完成";
       return both((r) => {
         const got = r === "buyer" ? args.toBuyer : args.toSeller;
         return card({
           icon: cancelled ? "❎" : "✅",
-          title: cancelled ? "交易已取消，钱已退回" : "交易完成",
+          title,
           deal,
           lines: got > 0n
             ? [`你收到了 *${amt(got, info)}*`, ...settleBreakdown(r, args, deal, info)]

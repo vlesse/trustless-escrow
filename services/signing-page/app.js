@@ -33,6 +33,10 @@ const ESCROW_ABI = [
   "function claimNonDelivery()",
   "function raiseDispute(string evidenceURI)",
   "function submitEvidence(string evidenceURI)",
+  "function concede()",
+  "function offerSettlement(uint256 toBuyer)",
+  "function cancelSettlementOffer()",
+  "function acceptSettlement(uint256 toBuyer)",
 ];
 const FACTORY_ABI = [
   "function createDeal(address token, address buyer, address seller, uint256 price, uint256 buyerBond, uint256 sellerBond, uint64 deliveryWindow, uint64 inspectionWindow, bytes32 termsHash) returns (address)",
@@ -75,6 +79,11 @@ const DEAL_READ_ABI = [
   "function price() view returns (uint256)",
   "function buyerBond() view returns (uint256)",
   "function sellerBond() view returns (uint256)",
+  "function feeBps() view returns (uint16)",
+  "function lockedArbCost() view returns (uint256)",
+  "function state() view returns (uint8)",
+  "function offerBy() view returns (address)",
+  "function offerToBuyer() view returns (uint256)",
 ];
 
 const ifaces = {
@@ -92,6 +101,26 @@ const ifaces = {
 /// irreversible 的那几个必须说清楚「不可撤销」—— 这是用户最需要
 /// 在点下去之前知道的一件事。
 const ACTIONS = {
+  concede: {
+    title: "认输",
+    risk: "irreversible",
+    note: "立刻按对方胜诉结算，和被陪审团判输完全一样。仲裁费从你的押金里出，信誉记录会记一笔败诉。",
+  },
+  offerSettlement: {
+    title: "发出和解方案",
+    risk: "low",
+    note: "只是把方案发给对方，不动任何钱。对方同意之前，你随时可以改或者撤回。",
+  },
+  acceptSettlement: {
+    title: "接受和解方案，立刻结算",
+    risk: "irreversible",
+    note: "按下面的分法立刻结算，钱马上转出，不能撤回。",
+  },
+  cancelSettlementOffer: {
+    title: "撤回和解方案",
+    risk: "low",
+    note: "撤回你挂着的方案。不动任何钱。",
+  },
   challenge: {
     title: "挑战 AI 的初步裁决",
     risk: "high",
@@ -301,6 +330,16 @@ async function runChecks(tx, decoded, chain) {
       const ok = await factory.isDeal(tx.to);
       add(ok, "目标是工厂登记的托管合约",
         ok ? "已在链上验证" : "这个地址不是本协议工厂创建的。可能是钓鱼合约，请勿签名。");
+
+      // 接受和解：金额必须正是对方现在挂着的那一份。对不上的话合约也会拒绝，
+      // 但在签名前说清楚，比让用户付了 gas 再看到一个失败强。
+      if (ok && decoded.name === "acceptSettlement") {
+        const d = new ethers.Contract(tx.to, DEAL_READ_ABI, rpc);
+        const [by, amt] = await Promise.all([d.offerBy(), d.offerToBuyer()]);
+        const same = by !== ethers.ZeroAddress && amt === decoded.args[0];
+        add(same, "这正是对方现在挂着的方案",
+          same ? "金额一致" : "对方的方案已经改过或撤回了。请回到 Telegram 重新查看，不要签这一笔。");
+      }
     } else if (decoded.kind === "identityBond") {
       // 押金合约地址只能来自本地 config，不能来自 URL 里的那笔交易本身 ——
       // 否则「验证」等于拿攻击者给的答案去对攻击者出的题。
@@ -474,6 +513,59 @@ function showEvidence(uri) {
   $("evidence-box").hidden = false;
 }
 
+/*
+ * 和解、认输：签名前把「买家拿多少、卖家拿多少」算出来摆着。
+ *
+ * 公式是 split.js —— 机器人、合约测试共用的同一份，合约测试拿真实结算结果
+ * 逐 wei 比对过。页面自己去链上读这笔交易的参数，不用链接里带来的任何数字。
+ */
+const SPLIT_METHODS = ["offerSettlement", "acceptSettlement", "concede"];
+
+async function showSplit(decoded, chain) {
+  const box = $("split-box");
+  const body = $("split-body");
+  try {
+    const rpc = new ethers.JsonRpcProvider(chain.rpcUrl);
+    const d = new ethers.Contract(state.tx.to, DEAL_READ_ABI, rpc);
+    const [tokenAddr, price, bb, sb, feeBps, cost, st] = await Promise.all([
+      d.token(), d.price(), d.buyerBond(), d.sellerBond(), d.feeBps(), d.lockedArbCost(), d.state(),
+    ]);
+    const token = new ethers.Contract(tokenAddr, ERC20_ABI, rpc);
+    const [dec, sym] = await Promise.all([token.decimals(), token.symbol()]);
+    const f = (x) => `${ethers.formatUnits(x, dec)} ${sym}`;
+    const view = { price, buyerBond: bb, sellerBond: sb, feeBps, lockedArbCost: cost, disputed: Number(st) === 4 };
+
+    let s;
+    if (decoded.name === "concede") {
+      // 页面不知道签名的是买家还是卖家，两种都列出来 —— 连上钱包之后按地址对号
+      const b = EscrowSplit.concedeSplit(view, "buyer");
+      const k = EscrowSplit.concedeSplit(view, "seller");
+      body.textContent =
+        `如果是买家认输：买家拿到 ${f(b.toBuyer)}，卖家拿到 ${f(b.toSeller)}\n` +
+        `如果是卖家认输：买家拿到 ${f(k.toBuyer)}，卖家拿到 ${f(k.toSeller)}\n` +
+        `仲裁费 ${f(b.cost)} 从认输一方的押金里出`;
+    } else {
+      s = EscrowSplit.settlementSplit(view, decoded.args[0]);
+      if (!s) {
+        body.textContent = "这个金额超出了能分的总额，合约会拒绝。请不要签名。";
+      } else {
+        const refund = EscrowSplit.refundOf(view, decoded.args[0]);
+        body.textContent =
+          (refund !== null ? `货款退给买家：${f(refund)}\n` : "") +
+          `买家拿到：${f(s.toBuyer)}\n卖家拿到：${f(s.toSeller)}` +
+          (s.fee > 0n ? `（已扣手续费 ${f(s.fee)}）` : "") +
+          (s.cost > 0n ? `\n仲裁费：${f(s.cost)}` : "");
+      }
+    }
+    $("split-label").textContent = decoded.name === "offerSettlement"
+      ? "对方同意后，按这个方案结算：" : "签名后立刻按这个结算：";
+    box.hidden = false;
+  } catch (e) {
+    body.textContent = "读不到这笔交易的金额，请稍后刷新。读不到之前请不要签名。";
+    box.hidden = false;
+  }
+}
+
 function riskClass(risk) {
   return { low: "risk-low", medium: "risk-medium", high: "risk-high", irreversible: "risk-irreversible" }[risk] ?? "risk-medium";
 }
@@ -559,6 +651,7 @@ function render() {
   }
   $("action-note").textContent = action?.note ?? "本页面无法解读这笔交易的含义。请勿签名。";
   if (EVIDENCE_METHODS.includes(state.decoded?.name)) showEvidence(String(state.decoded.args[0] ?? ""));
+  if (SPLIT_METHODS.includes(state.decoded?.name)) showSplit(state.decoded, state.chain);
   $("action-card").className = "card " + riskClass(action?.risk ?? "high");
 
   if (action?.risk === "irreversible") {

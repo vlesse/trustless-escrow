@@ -195,6 +195,30 @@ describe("真实消息的转义", () => {
     for (const k of ["delivery", "inspection"]) clean("deadline/" + k, watcher.describeDeadline(deal, k, 5400).text);
   });
 
+  test("和解与认输", () => {
+    const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
+    const deal = { address: A, buyer: A, seller: B, token: A, state: 4, feeBps: 100, outcome: 0,
+      price: U("100.5"), buyerBond: U("100.5"), sellerBond: U("100.5"), lockedArbCost: U("10.5") };
+    let n = 0;
+    for (const [name, args] of [
+      ["SettlementOffered", { by: A, toBuyer: U("150.25") }],
+      ["SettlementOfferCleared", { by: A }],
+      ["Conceded", { by: B }],
+      ["Settled", { finalState: 5, toBuyer: U("150.25"), toSeller: U("140"), toArbitrator: U("10.5"), fee: U("0.5") }],
+    ]) {
+      for (const m of watcher.describeEvent(name, args, { ...deal, outcome: name === "Settled" ? 8 : 0 }, INFO)) {
+        clean(`${name}/${m.to}`, m.text); n++;
+      }
+    }
+    assert.equal(n, 8);
+    // 挂着方案时的 /deal
+    for (const role of ["buyer", "seller"]) {
+      const md = cmds.renderDealHeader({ deal: { ...deal, offerBy: A, offerToBuyer: U("150.25"), arb: null }, info: INFO, role }).join("\n");
+      clean(`deal-offer/${role}`, md);
+      assert.match(md, /和解方案/);
+    }
+  });
+
   test("争议各阶段", () => {
     const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
     const deal = { address: A, buyer: A, seller: B, token: A, state: 4, feeBps: 100 };

@@ -30,6 +30,11 @@ const ESCROW_READ_ABI = [
   // 过了 —— 交付期本身只有 4 小时的时候，「还剩 24 小时」这档毫无意义。
   "function deliveryWindow() view returns (uint64)",
   "function inspectionWindow() view returns (uint64)",
+  // 和解要用：挂着的提议、争议中要先扣掉的仲裁费、结局（区分认输/和解/判决）
+  "function offerBy() view returns (address)",
+  "function offerToBuyer() view returns (uint256)",
+  "function lockedArbCost() view returns (uint256)",
+  "function outcome() view returns (uint8)",
 ];
 
 const FACTORY_READ_ABI = [
@@ -75,12 +80,13 @@ export async function loadDeal(addr, provider) {
   const [
     token, buyer, seller, price, buyerBond, sellerBond, feeBps, arbitrator,
     termsHash, state, buyerFunded, sellerFunded, deliveryDeadline, inspectionDeadline,
-    deliveryWindow, inspectionWindow,
+    deliveryWindow, inspectionWindow, offerBy, offerToBuyer, lockedArbCost, outcome,
   ] = await Promise.all([
     e.token(), e.buyer(), e.seller(), e.price(), e.buyerBond(), e.sellerBond(),
     e.feeBps(), e.arbitrator(), e.termsHash(), e.state(), e.buyerFunded(),
     e.sellerFunded(), e.deliveryDeadline(), e.inspectionDeadline(),
     e.deliveryWindow(), e.inspectionWindow(),
+    e.offerBy(), e.offerToBuyer(), e.lockedArbCost(), e.outcome(),
   ]);
 
   return {
@@ -95,6 +101,10 @@ export async function loadDeal(addr, provider) {
     inspectionDeadline: Number(inspectionDeadline),
     deliveryWindow: Number(deliveryWindow),
     inspectionWindow: Number(inspectionWindow),
+    offerBy: offerBy === ethers.ZeroAddress ? null : offerBy,
+    offerToBuyer,
+    lockedArbCost,
+    outcome: Number(outcome),
     // 争议中的交易带上仲裁快照：挑战/上诉按钮、以及「进行到哪了」都要靠它。
     // 读失败不影响其它功能 —— 没有快照就只是少了那两个按钮。
     arb: Number(state) === State.Disputed
@@ -156,10 +166,10 @@ export function availableActions(deal, role, now = Math.floor(Date.now() / 1000)
 
     case State.Funded:
       if (role === "seller") {
-        add("delivered", "标记已交付");
-        if (now >= deal.deliveryDeadline) {
-          add("dispute", "提起争议", "交付期已过，可对抗买家的未交付索赔");
-        }
+        // 交付期过后合约不再接受「标记已交付」（防卖家抢跑买家的退款）。
+        // 原来这里不看时间，按钮照给 —— 卖家点下去签名，只会得到一次失败。
+        if (now < deal.deliveryDeadline) add("delivered", "标记已交付");
+        else add("dispute", "提起争议", "交付期已过，可对抗买家的未交付索赔");
       }
       if (role === "buyer") {
         add("confirm", "确认收货并放款", "你可以随时主动放款");
@@ -183,10 +193,21 @@ export function availableActions(deal, role, now = Math.floor(Date.now() / 1000)
     case State.Disputed:
       add("evidence", "提交证据", "争议期内可持续补充");
       for (const a of arbitrationActions(deal.arb, role, now)) add(a.id, a.label);
+      add("concede", "认输", "立刻按对方胜诉结算，和被判输完全一样");
       break;
 
     default:
       break;
+  }
+
+  // 和解：交付前、验收中、争议中都能谈。验收期过了就不提 —— 那时任何人都能
+  // 直接把钱结算给卖家，还摆一个「提出和解」只会让人以为还有得谈。
+  const inspectionOver = deal.state === State.Delivered && now >= deal.inspectionDeadline;
+  if ([State.Funded, State.Delivered, State.Disputed].includes(deal.state) && !inspectionOver) {
+    const mine = deal.offerBy && deal.offerBy.toLowerCase() === (role === "buyer" ? deal.buyer : deal.seller).toLowerCase();
+    if (deal.offerBy && !mine) add("accept", "接受对方的和解方案", "接受后立刻按方案结算");
+    add("offer", deal.offerBy && !mine ? "我要还价" : "提出和解", "谈好怎么分，不用等仲裁");
+    if (mine) add("cancelOffer", "撤回我的和解方案");
   }
   return acts;
 }

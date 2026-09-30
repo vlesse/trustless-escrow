@@ -364,3 +364,90 @@ describe("认输与和解：仲裁层照常走完，没有钱被锁住", functio
     expect((await reputation.recordOf(buyer.address)).disputesInconclusive).to.equal(0n, "和解不能记成「未定责争议」");
   });
 });
+
+// ======================================================================
+// 三、用户签名前看到的数字 == 链上实际分出去的数字
+// ======================================================================
+
+/*
+ * 机器人和签名页在签名前告诉用户「你拿多少、对方拿多少」，用的是
+ * services/signing-page/split.js。这里拿真实合约的结算结果逐个比对 ——
+ * 公式有一个 wei 对不上，用户签下的就是一个他没看到过的结果。
+ */
+describe("签名前展示的分钱结果与链上一致", function () {
+  const split = require("../services/signing-page/split.js");
+  const ARB_COST = U(20) + 1n;   // 奇数，专门测仲裁费两边各半时的取整
+  let buyer, seller, token, factory, arb;
+
+  beforeEach(async function () {
+    let owner, feeBene;
+    [owner, buyer, seller, feeBene] = await ethers.getSigners();
+    token = await (await ethers.getContractFactory("MockERC20")).deploy();
+    const vault = await (await ethers.getContractFactory("FeeVault")).deploy(feeBene.address);
+    const impl = await (await ethers.getContractFactory("Escrow")).deploy();
+    arb = await (await ethers.getContractFactory("DirectArbitrator")).deploy();
+    await arb.setCost(ARB_COST);
+    factory = await (await ethers.getContractFactory("EscrowFactory")).deploy(
+      await impl.getAddress(), await arb.getAddress(), await vault.getAddress(), FEE_BPS, owner.address);
+    for (const s of [buyer, seller]) await token.mint(s.address, U(1000000));
+  });
+
+  async function deal(price, bond, disputed) {
+    const rc = await (await factory.connect(seller).createDeal(await token.getAddress(),
+      buyer.address, seller.address, price, bond, bond, DELIVERY, INSPECTION, TERMS)).wait();
+    const d = await ethers.getContractAt("Escrow", rc.logs.find((l) => l.fragment?.name === "DealCreated").args.deal);
+    await token.connect(seller).approve(await d.getAddress(), bond);
+    await d.connect(seller).depositSeller();
+    await token.connect(buyer).approve(await d.getAddress(), price + bond);
+    await d.connect(buyer).depositBuyer();
+    await d.connect(seller).markDelivered("x");
+    if (disputed) await d.connect(buyer).raiseDispute("x");
+    const view = { price, buyerBond: bond, sellerBond: bond, feeBps: FEE_BPS,
+      lockedArbCost: await d.lockedArbCost(), disputed };
+    return { d, view };
+  }
+
+  async function paid(d, fn) {
+    const rc = await (await fn()).wait();
+    const ev = rc.logs.map((l) => { try { return d.interface.parseLog(l); } catch { return null; } })
+      .find((x) => x && x.name === "Settled");
+    return { toBuyer: ev.args.toBuyer, toSeller: ev.args.toSeller, fee: ev.args.fee, cost: ev.args.toArbitrator };
+  }
+
+  it("和解：各种金额、争议前后，展示的数与实际结算完全一致", async function () {
+    let seed = 12345;
+    const rand = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    for (let k = 0; k < 16; k++) {
+      const price = U(10 + Math.floor(rand() * 5000)) + BigInt(Math.floor(rand() * 999));
+      const bond = U(ARB_COST_UNITS()) + BigInt(Math.floor(rand() * 999));
+      const disputed = k % 2 === 1;
+      const { d, view } = await deal(price, bond, disputed);
+      // 按「退多少货款」出价（机器人的问法），也覆盖边界：全退、不退
+      const refund = k % 4 === 0 ? price : k % 4 === 2 ? 0n : (price * BigInt(Math.floor(rand() * 1000))) / 1000n;
+      const toBuyer = split.toBuyerForRefund(view, refund);
+      const want = split.settlementSplit(view, toBuyer);
+      expect(split.refundOf(view, toBuyer)).to.equal(refund, "退款金额要能原样还原");
+      await d.connect(buyer).offerSettlement(toBuyer);
+      const got = await paid(d, () => d.connect(seller).acceptSettlement(toBuyer));
+      expect(got).to.deep.equal({ toBuyer: want.toBuyer, toSeller: want.toSeller, fee: want.fee, cost: want.cost },
+        `第 ${k} 笔（${disputed ? "争议中" : "验收中"}，退款 ${refund}）`);
+    }
+    function ARB_COST_UNITS() { return 25; }   // 押金至少要盖住仲裁费
+  });
+
+  it("认输：展示的数与实际结算完全一致", async function () {
+    for (const who of ["buyer", "seller"]) {
+      const { d, view } = await deal(U(777) + 3n, U(333) + 7n, true);
+      const want = split.concedeSplit(view, who);
+      const got = await paid(d, () => d.connect(who === "buyer" ? buyer : seller).concede());
+      expect(got).to.deep.equal({ toBuyer: want.toBuyer, toSeller: want.toSeller, fee: want.fee, cost: want.cost }, who);
+    }
+  });
+
+  it("超出可分配总额的金额：展示层也拒绝，与合约一致", async function () {
+    const { d, view } = await deal(U(100), U(100), true);
+    const pool = view.price + view.buyerBond + view.sellerBond - view.lockedArbCost;
+    expect(split.settlementSplit(view, pool + 1n)).to.equal(null);
+    await expect(d.connect(buyer).offerSettlement(pool + 1n)).to.be.revertedWithCustomError(d, "AmountTooLarge");
+  });
+});

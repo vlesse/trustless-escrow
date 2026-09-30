@@ -25,6 +25,7 @@ import {
   parseEvidenceInput, canAdd, planSubmission, buildBundle, summarizeItems, REJECT_TEXT, EVIDENCE_HOWTO,
 } from "./evidence.js";
 import * as evstore from "./evidencestore.js";
+import { settlementSplit, toBuyerForRefund, refundOf, concedeSplit, splitView, splitLines } from "./split.js";
 
 const provider = makeProvider();
 
@@ -42,6 +43,10 @@ const TX_NOTE = {
   depositSeller: "这一步真正把保证金锁进托管合约。",
   challenge: "押上保证金，把案子从 AI 交给陪审团重新判。陪审团判你对，押金退回并拿到对方那份；判你错，押金归对方。",
   appeal: "付上诉费，交给更多陪审员重新判。改判的话拖延押金退还；维持原判，拖延押金赔给对方。",
+  concede: "认输后立刻按对方胜诉结算，和被判输完全一样，不能撤回。",
+  offerSettlement: "这一步只是把你的方案发给对方，不动任何钱。对方同意之前，你随时可以改或者撤回。",
+  acceptSettlement: "接受后立刻按这个方案结算，不能撤回。",
+  cancelSettlementOffer: "撤回你挂着的和解方案。不动任何钱。",
 };
 
 /// 把一个交易请求渲染成可签名的三种形式。
@@ -597,6 +602,19 @@ export function renderDealHeader({ deal, info, role, factoryArbitrator = null, l
     lines.push(`验收截止: ${esc(due(deal.inspectionDeadline))}`);
   }
 
+  // 挂着的和解方案：谁提的、按它分各拿多少、该点哪个按钮
+  if (deal.offerBy && role) {
+    const s = settlementSplit(splitView(deal), deal.offerToBuyer);
+    const mineOffer = deal.offerBy.toLowerCase() === (role === "buyer" ? deal.buyer : deal.seller).toLowerCase();
+    if (s) {
+      lines.push("", `*${esc(mineOffer ? "你提的和解方案（等对方回应）" : "对方提的和解方案")}*`);
+      lines.push(...splitLines(s, role, info));
+      lines.push(esc(mineOffer
+        ? "对方同意就立刻结算。想改就再提一次，想撤回点「撤回我的和解方案」。"
+        : "同意就点「接受对方的和解方案」；不同意点「我要还价」。"));
+    }
+  }
+
   // 争议期间：进行到哪了、接下来是什么、按钮什么时候出现
   const progress = deal.state === State.Disputed ? arbitrationProgress(deal.arb, role, due) : null;
   if (progress) {
@@ -766,6 +784,15 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
     case "cancel":
       await sendTxs(chatId, [buildAction(deal.address, "cancelUnfunded", [], "取消交易")]);
       return;
+    case "offer":
+      return startOffer(chatId, userId, deal, info, role);
+    case "accept":
+      return showAccept(chatId, deal, info, role);
+    case "cancelOffer":
+      await sendTxs(chatId, [buildAction(deal.address, "cancelSettlementOffer", [], "撤回和解方案")]);
+      return;
+    case "concede":
+      return showConcede(chatId, deal, info, role);
     case "challenge":
     case "appeal": {
       // 能走到这里，说明 availableActions 已经按链上快照确认过：窗口还开着、结果对他不利
@@ -833,6 +860,129 @@ export async function runAction(chatId, userId, actionId, dealAddr) {
     default:
       await sendMessage(chatId, esc("未知操作"));
   }
+}
+
+// ------------------------------------------------------------------ 和解与认输
+//
+// 问法按「什么都不懂的人」设计：不让用户自己算押金、仲裁费，只问一件事 ——
+// 「货款退给买家多少？」押金各自退回、仲裁费两边各半，由公式处理。
+// 签名之前把「你拿多少、对方拿多少」算好摆出来，用的是和链上逐 wei 核对过的
+// 那份公式（signing-page/split.js）。
+
+const who = (role) => (role === "buyer" ? "买家" : "卖家");
+
+async function startOffer(chatId, userId, deal, info, role) {
+  const v = splitView(deal);
+  session.setFlow(userId, "offer", { deal: deal.address });
+  const half = deal.price / 2n;
+  await sendMessage(chatId, [
+    "*提出和解*",
+    "",
+    esc("和对方谈好怎么分钱。对方同意后立刻结束，不用等仲裁。"),
+    "",
+    esc(v.disputed
+      ? `押金各自退回；已经起了争议，仲裁费 ${fmtAmount(deal.lockedArbCost, info)} 双方各出一半。`
+      : "押金各自退回。"),
+    `*${esc(`你只需要决定：货款 ${fmtAmount(deal.price, info)} 退给买家多少？`)}*`,
+    "",
+    esc("点下面的按钮，或者直接发一个数字（比如 120）。"),
+  ].join("\n"), keyboard([
+    [btn(`全额退款（退 ${fmtAmount(deal.price, info)}）`, "offpct:100")],
+    [btn(`退一半（退 ${fmtAmount(half, info)}）`, "offpct:50")],
+    [btn("不退（货款全给卖家）", "offpct:0")],
+  ]));
+}
+
+/// 按钮：退百分之几。只收 0 / 50 / 100 —— callback_data 是客户端发来的，不能信任。
+export async function offerByPercent(chatId, userId, pct) {
+  const u = session.user(userId);
+  if (u.flow !== "offer" || !u.draft?.deal || !["0", "50", "100"].includes(pct)) {
+    await sendMessage(chatId, esc("这个按钮已经失效了。请重新点「提出和解」。"));
+    return;
+  }
+  const deal = await loadDeal(u.draft.deal, provider);
+  return finishOffer(chatId, userId, deal, (deal.price * BigInt(pct)) / 100n);
+}
+
+async function handleOfferInput(chatId, userId, text) {
+  const u = session.user(userId);
+  const deal = await loadDeal(u.draft.deal, provider);
+  const info = await tokenInfo(deal.token, provider);
+  let refund;
+  try {
+    const t = String(text).trim().replace(/[,，\s]/g, "").replace(/(USDT|U)$/i, "");
+    if (!/^\d+(\.\d+)?$/.test(t)) throw new Error();
+    refund = ethers.parseUnits(t, info.decimals);
+  } catch {
+    await sendMessage(chatId, esc("请发一个数字，比如 120。或者点上面的按钮。"));
+    return;
+  }
+  if (refund > deal.price) {
+    await sendMessage(chatId, esc(`最多只能退全部货款 ${fmtAmount(deal.price, info)}。请重新发一个数字。`));
+    return;
+  }
+  return finishOffer(chatId, userId, deal, refund);
+}
+
+async function finishOffer(chatId, userId, deal, refund) {
+  const u = session.user(userId);
+  const role = roleOf(deal, u.address);
+  const info = await tokenInfo(deal.token, provider);
+  if (!role || !availableActions(deal, role).some((a) => a.id === "offer")) {
+    session.clearFlow(userId);
+    await sendMessage(chatId, esc("这笔交易现在已经不能和解了。发 /deal 看看它的最新状态。"));
+    return;
+  }
+  const v = splitView(deal);
+  const toBuyer = toBuyerForRefund(v, refund);
+  const s = settlementSplit(v, toBuyer);
+  session.clearFlow(userId);
+  await sendMessage(chatId, [
+    "*你的和解方案*",
+    "",
+    esc(`货款退给买家：${fmtAmount(refund, info)}`),
+    "",
+    esc("对方同意的话，结果是："),
+    ...splitLines(s, role, info),
+    "",
+    esc("签名把方案发给对方（这一步不动钱）。对方点「接受」后立刻结算。"),
+  ].join("\n"));
+  await sendTxs(chatId, [buildAction(deal.address, "offerSettlement", [toBuyer], "发出和解方案")]);
+}
+
+async function showAccept(chatId, deal, info, role) {
+  const v = splitView(deal);
+  const s = settlementSplit(v, deal.offerToBuyer);
+  if (!s) {
+    await sendMessage(chatId, esc("对方的方案已经失效了。发 /deal 看看最新状态。"));
+    return;
+  }
+  const refund = refundOf(v, deal.offerToBuyer);
+  await sendMessage(chatId, [
+    "*对方的和解方案*",
+    "",
+    ...(refund !== null ? [esc(`货款退给买家：${fmtAmount(refund, info)}`), ""] : []),
+    ...splitLines(s, role, info),
+    "",
+    `*${esc("⚠️ 接受后立刻按这个结算，不能撤回。")}*`,
+    esc("不同意的话别签，点「我要还价」提你自己的方案。"),
+  ].join("\n"));
+  await sendTxs(chatId, [buildAction(deal.address, "acceptSettlement", [deal.offerToBuyer], "接受和解方案")]);
+}
+
+async function showConcede(chatId, deal, info, role) {
+  const s = concedeSplit(splitView(deal), role);
+  await sendMessage(chatId, [
+    "*认输*",
+    "",
+    esc("认输后立刻按对方胜诉结算，和被陪审团判输完全一样："),
+    ...splitLines(s, role, info),
+    "",
+    esc(`仲裁费 ${fmtAmount(s.cost, info)} 从你的押金里出。信誉记录会记一笔败诉。`),
+    `*${esc("⚠️ 不能撤回。")}*`,
+    esc("如果只是想早点结束、但不认为自己错了，可以先试试「提出和解」。"),
+  ].join("\n"));
+  await sendTxs(chatId, [buildAction(deal.address, "concede", [], "认输")]);
 }
 
 const EVIDENCE_LABELS = {
@@ -1012,6 +1162,7 @@ export async function handleFlowInput(chatId, userId, text, opts = {}) {
     case "bind": return handleBindSignature(chatId, userId, text);
     case "new": return handleNewInput(chatId, userId, text);
     case "evidence": return handleEvidenceInput(chatId, userId, text, opts);
+    case "offer": return handleOfferInput(chatId, userId, text);
     default: return false;
   }
 }

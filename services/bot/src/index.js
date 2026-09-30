@@ -161,6 +161,8 @@ async function onCallback(q) {
   }
   // 证据篮：全部提交 / 清空重来。a=托管合约地址
   if (kind === "evsub") return cmd.submitBasket(chatId, userId, a);
+  // 和解按钮：退百分之几（a = 0 / 50 / 100）
+  if (kind === "offpct") return cmd.offerByPercent(chatId, userId, a);
   if (kind === "evclr") return cmd.clearBasket(chatId, userId, a);
 }
 

@@ -121,7 +121,8 @@
     border-radius: 10px; background: var(--accent); color: #fff; text-decoration: none;
     margin: 0 0 12px;
   }
-  #evidence-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  #evidence-box, #split-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+  #split-body { white-space: pre-wrap; font-size: 15px; font-weight: 600; line-height: 1.7; }
   .ev-label { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
   #evidence-body { white-space: pre-wrap; word-break: break-word; font-size: 14px;
                    max-height: 260px; overflow: auto; }
@@ -253,6 +254,10 @@
   <div id="action-card" class="card">
     <p id="action-title"></p>
     <p id="action-note"></p>
+    <div id="split-box" hidden>
+      <p class="ev-label" id="split-label"></p>
+      <div id="split-body"></div>
+    </div>
     <div id="evidence-box" hidden>
       <p class="ev-label">这次写进链上的内容：</p>
       <div id="evidence-body"></div>
@@ -306,6 +311,7 @@
 
 <script src="vendor/ethers.umd.min.js"></script>
 <script src="config.js"></script>
+<script src="split.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -30,6 +30,10 @@ export const ESCROW_ABI = [
   "function claimNonDelivery()",
   "function raiseDispute(string evidenceURI)",
   "function submitEvidence(string evidenceURI)",
+  "function concede()",
+  "function offerSettlement(uint256 toBuyer)",
+  "function cancelSettlementOffer()",
+  "function acceptSettlement(uint256 toBuyer)",
 ];
 
 export const ERC20_ABI = ["function approve(address spender, uint256 amount) returns (bool)"];
