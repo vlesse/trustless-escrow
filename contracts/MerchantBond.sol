@@ -12,6 +12,21 @@ interface IEscrowSellerSide {
     function token() external view returns (address);
     function sellerBond() external view returns (uint256);
     function depositSeller() external;
+    function depositBuyer() external;
+}
+
+interface IStoreFactory {
+    function createDealFor(
+        address token,
+        address buyer,
+        address seller,
+        uint256 price,
+        uint256 buyerBond,
+        uint256 sellerBond,
+        uint64 deliveryWindow,
+        uint64 inspectionWindow,
+        bytes32 termsHash
+    ) external returns (address);
 }
 
 /// @title MerchantBond
@@ -56,6 +71,12 @@ contract MerchantBond {
     event Deposited(address indexed merchant, uint256 amount, uint256 balance);
     event Withdrawn(address indexed merchant, uint256 amount, uint256 balance);
     event DealFunded(address indexed merchant, address indexed deal, uint256 amount, uint256 balance);
+    event Listed(
+        uint256 indexed id, address indexed seller, uint256 price, uint256 buyerBond, uint256 sellerBond,
+        uint64 deliveryWindow, uint64 inspectionWindow, bytes32 termsHash, uint32 stock
+    );
+    event ListingUpdated(uint256 indexed id, bool active, uint32 stock);
+    event Purchased(uint256 indexed id, address indexed deal, address indexed buyer, address seller);
 
     error ZeroAddress();
     error NotADeal();
@@ -63,6 +84,10 @@ contract MerchantBond {
     error WrongToken();
     error InsufficientBalance();
     error Reentrancy();
+    error NotListingOwner();
+    error ListingInactive();
+    error SoldOut();
+    error UnknownListing();
 
     bool private _entered;
 
@@ -122,6 +147,114 @@ contract MerchantBond {
         e.depositSeller();
 
         emit DealFunded(msg.sender, deal, amount, bal - amount);
+    }
+
+    // ============================================================ 店铺
+    //
+    // 跑量的卖家（点卡、激活码）不可能一单一单地跟买家对接：先问地址、再走开单
+    // 问答、再各自入金。店铺模式把它变成：卖家上架一次，买家点一下就下单。
+    //
+    //   上架 list()    卖家定好价格、押金、时限、条款、库存。**上架后不能改**，只能
+    //                  下架或调库存 —— 否则卖家可以抢在买家下单的同一时刻涨价、换条款。
+    //   下单 buy()     一笔交易里：开单 → 从卖家额度扣押金 → 收买家的钱 → 代买家入金。
+    //                  交易当场生效。任何一步不满足（卖家额度不够、售罄、已下架），
+    //                  整笔回滚，谁的钱都没动。
+    //
+    // 每一单仍然是一个独立的托管合约，逐笔独立的押金 —— 店铺只是把开单和入金
+    // 自动化了，没有改变任何一笔交易的资金隔离。
+
+    struct Listing {
+        address seller;
+        bool active;
+        /// @dev 剩余可售份数。卖完自动停，不会超卖出卖家发不出的货。
+        ///      不做「无限」：卡密类商品库存本来就有限，真要不限就写个大数。
+        uint32 stock;
+        uint32 sold;
+        uint64 deliveryWindow;
+        uint64 inspectionWindow;
+        uint256 price;
+        uint256 buyerBond;
+        uint256 sellerBond;
+        bytes32 termsHash;
+    }
+
+    mapping(uint256 => Listing) private _listings;
+    uint256 public nextListingId = 1;
+
+    function listings(uint256 id) external view returns (Listing memory) {
+        return _listings[id];
+    }
+
+    /// @notice 上架。上架后价格、押金、时限、条款都不能再改。
+    function list(
+        uint256 price,
+        uint256 buyerBond,
+        uint256 sellerBond,
+        uint64 deliveryWindow,
+        uint64 inspectionWindow,
+        bytes32 termsHash,
+        uint32 stock
+    ) external returns (uint256 id) {
+        id = nextListingId++;
+        Listing storage l = _listings[id];
+        l.seller = msg.sender;
+        l.active = true;
+        l.stock = stock;
+        l.deliveryWindow = deliveryWindow;
+        l.inspectionWindow = inspectionWindow;
+        l.price = price;
+        l.buyerBond = buyerBond;
+        l.sellerBond = sellerBond;
+        l.termsHash = termsHash;
+        emit Listed(id, msg.sender, price, buyerBond, sellerBond, deliveryWindow, inspectionWindow, termsHash, stock);
+    }
+
+    /// @notice 上架 / 下架，以及调库存。只有卖家本人能调。
+    /// @dev 只能动这两样。价格和条款是买家下单时看到的东西，永远不变。
+    function updateListing(uint256 id, bool active, uint32 stock) external {
+        Listing storage l = _listings[id];
+        if (l.seller == address(0)) revert UnknownListing();
+        if (l.seller != msg.sender) revert NotListingOwner();
+        l.active = active;
+        l.stock = stock;
+        emit ListingUpdated(id, active, stock);
+    }
+
+    /// @notice 下单。买家需事先把「货款 + 买家押金」授权给本合约。
+    /// @return deal 这一单的托管合约，下单完成时已经生效（双方都已入金）。
+    function buy(uint256 id) external nonReentrant returns (address deal) {
+        Listing storage l = _listings[id];
+        if (l.seller == address(0)) revert UnknownListing();
+        if (!l.active) revert ListingInactive();
+        if (l.stock == 0) revert SoldOut();
+
+        address seller = l.seller;
+        uint256 sb = l.sellerBond;
+        uint256 bal = balanceOf[seller];
+        if (bal < sb) revert InsufficientBalance();
+
+        // 先改账再对外调用
+        balanceOf[seller] = bal - sb;
+        l.stock -= 1;
+        l.sold += 1;
+
+        // 买家就是调用者本人 —— 这是工厂允许本合约代买家付款的全部前提
+        deal = IStoreFactory(address(factory)).createDealFor(
+            token, msg.sender, seller, l.price, l.buyerBond, sb, l.deliveryWindow, l.inspectionWindow, l.termsHash
+        );
+
+        // 卖家押金：从额度里出
+        token.safeApprove(deal, sb);
+        IEscrowSellerSide(deal).depositSeller();
+        emit DealFunded(seller, deal, sb, bal - sb);
+
+        // 买家的钱：先收进来，再代他入金。托管合约在这一步凑齐双方，当场生效。
+        uint256 need = l.price + l.buyerBond;
+        token.safeTransferFrom(msg.sender, address(this), need);
+        token.safeApprove(deal, need);
+        IEscrowSellerSide(deal).depositBuyer();
+
+        emit Purchased(id, deal, msg.sender, seller);
     }
 
     /// @notice 还能支付多少笔 `bond` 这么大的保证金。前端用来显示「还接得动几单」。

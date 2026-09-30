@@ -218,6 +218,7 @@ describe("托管协议", function () {
         token: await token.getAddress(), buyer: buyer.address, seller: seller.address,
         feeVault: await vault.getAddress(), arbitrator: await arb.getAddress(),
         bondPayer: ethers.ZeroAddress,
+        buyerPayer: ethers.ZeroAddress,
         price: PRICE, buyerBond: BUYER_BOND, sellerBond: SELLER_BOND,
         deliveryWindow: DELIVERY_WINDOW, inspectionWindow: INSPECTION_WINDOW,
         feeBps: 101, termsHash: ethers.ZeroHash,

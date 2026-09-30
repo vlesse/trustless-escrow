@@ -76,6 +76,7 @@ contract EscrowFactory {
     error TimelockNotElapsed();
     error SamePartyBothSides();
     error DealValueTooHigh();
+    error NotMerchantBond();
 
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
@@ -144,6 +145,39 @@ contract EscrowFactory {
         uint64 inspectionWindow,
         bytes32 termsHash
     ) external returns (address deal) {
+        return _create(token, buyer, seller, price, buyerBond, sellerBond, deliveryWindow, inspectionWindow, termsHash, address(0));
+    }
+
+    /// @notice 店铺下单专用：只有商家账户合约能调，并被登记为这一单的买家代付方。
+    /// @dev 商家账户合约自己保证 buyer 就是亲自调用下单的那个人（见 MerchantBond.buy）。
+    ///      这里只认调用者身份 —— 别的任何人来调，都可能替不知情的地址开单。
+    function createDealFor(
+        address token,
+        address buyer,
+        address seller,
+        uint256 price,
+        uint256 buyerBond,
+        uint256 sellerBond,
+        uint64 deliveryWindow,
+        uint64 inspectionWindow,
+        bytes32 termsHash
+    ) external returns (address deal) {
+        if (msg.sender != merchantBond || merchantBond == address(0)) revert NotMerchantBond();
+        return _create(token, buyer, seller, price, buyerBond, sellerBond, deliveryWindow, inspectionWindow, termsHash, msg.sender);
+    }
+
+    function _create(
+        address token,
+        address buyer,
+        address seller,
+        uint256 price,
+        uint256 buyerBond,
+        uint256 sellerBond,
+        uint64 deliveryWindow,
+        uint64 inspectionWindow,
+        bytes32 termsHash,
+        address buyerPayer
+    ) private returns (address deal) {
         if (buyer == seller) revert SamePartyBothSides();
 
         // 案值 = 货款 + 双方押金，与 Escrow.disputeValue() 同一口径。
@@ -162,6 +196,7 @@ contract EscrowFactory {
                 feeVault: defaultFeeVault,
                 arbitrator: defaultArbitrator,
                 bondPayer: merchantBond,
+                buyerPayer: buyerPayer,
                 price: price,
                 buyerBond: buyerBond,
                 sellerBond: sellerBond,

@@ -99,6 +99,18 @@ contract Escrow is IEscrowArbitrable {
     ///      而那个地址（商家额度池）自己只认卖家本人的指令。
     address public bondPayer;
 
+    /// @notice 唯一被允许代买家付款的地址，创建时写死。0 表示只有买家本人能付。
+    ///
+    /// @dev 店铺模式要「买家点一下就下单」：开单和付款必须在同一笔交易里完成，
+    ///      而那时托管合约还不存在，买家没法事先授权给它。所以由店铺（商家账户合约）
+    ///      先从买家那里收钱、再代他入金。
+    ///
+    ///      和 bondPayer 一样只能**往里付**，拿不走任何东西：退款、结算永远只付给
+    ///      交易里写死的 buyer。也和 bondPayer 一样不能随便设 —— 否则第三方可以替
+    ///      一个毫不知情的地址开单付款，再用卖家一方的争议给他刷出一条败诉记录。
+    ///      所以工厂只允许商家账户合约设置它，而那个合约只替**亲自调用下单的人**付款。
+    address public buyerPayer;
+
     uint256 public price;
     uint256 public buyerBond;
     uint256 public sellerBond;
@@ -196,6 +208,7 @@ contract Escrow is IEscrowArbitrable {
         address feeVault;
         address arbitrator;
         address bondPayer;
+        address buyerPayer;
         uint256 price;
         uint256 buyerBond;
         uint256 sellerBond;
@@ -218,6 +231,7 @@ contract Escrow is IEscrowArbitrable {
         feeVault = t.feeVault;
         arbitrator = t.arbitrator;
         bondPayer = t.bondPayer;
+        buyerPayer = t.buyerPayer;
         price = t.price;
         buyerBond = t.buyerBond;
         sellerBond = t.sellerBond;
@@ -249,9 +263,10 @@ contract Escrow is IEscrowArbitrable {
         _tryActivate();
     }
 
+    /// @dev 买家本人，或创建时指定的代付方（店铺）。两者之外一律拒绝。
     function depositBuyer() external nonReentrant {
         if (state != State.Open) revert BadState();
-        if (msg.sender != buyer) revert NotParty();
+        if (msg.sender != buyer && msg.sender != buyerPayer) revert NotParty();
         if (buyerFunded) revert AlreadyFunded();
         buyerFunded = true;
         token.safeTransferFrom(msg.sender, address(this), price + buyerBond);

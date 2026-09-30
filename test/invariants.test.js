@@ -170,6 +170,24 @@ describe("不变量（随机动作序列）", function () {
     );
   }
 
+  /// 从店铺下单：卖家先存额度、上架，买家一步下单，交易当场生效。
+  /// 之后的随机动作和普通交易完全一样 —— 要验的就是「店铺开出来的单」
+  /// 在所有后续路径上都守得住同样的不变量，而且店铺账面始终等于它手里的钱。
+  async function createViaStore(buyer, seller, price, bond) {
+    await pool.connect(seller).deposit(bond);
+    const lrc = await (await pool.connect(seller).list(price, bond, bond, DELIVERY, INSPECTION, ethers.ZeroHash, 1)).wait();
+    const id = lrc.logs.map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
+      .find((x) => x && x.name === "Listed").args.id;
+    const rc = await (await pool.connect(buyer).buy(id)).wait();
+    const address = rc.logs.map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
+      .find((x) => x && x.name === "Purchased").args.deal;
+    return {
+      address, buyer, seller, price, buyerBond: bond, sellerBond: bond,
+      contract: await ethers.getContractAt("Escrow", address),
+      feeSeen: 0n, viaStore: true,
+    };
+  }
+
   async function createDeal(buyer, seller, price, bond) {
     const rc = await (await factory.connect(buyer).createDeal(
       await token.getAddress(), buyer.address, seller.address,
@@ -347,7 +365,10 @@ describe("不变量（随机动作序列）", function () {
 
     const price = U(100 + Math.floor(rand() * 900));
     const bond = U(100 + Math.floor(rand() * 900));
-    const d = await createDeal(buyer, seller, price, bond);
+    // 三成的路径从店铺下单开始（交易一出生就已生效）
+    const d = rand() < 0.3
+      ? await createViaStore(buyer, seller, price, bond)
+      : await createDeal(buyer, seller, price, bond);
     const deals = [d];
 
     const total = await totalSupplyHeld(deals);
