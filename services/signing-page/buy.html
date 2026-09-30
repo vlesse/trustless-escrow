@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>下单 · 人人担保</title>
+<link rel="stylesheet" href="shop.css">
+</head>
+<body>
+<main>
+  <h1 id="title">正在读取商品……</h1>
+  <p class="sub">人人担保 · 钱锁在这一单自己的合约里，平台拿不走</p>
+
+  <div id="fatal" class="banner bad" hidden></div>
+
+  <div id="body" hidden>
+    <div id="notice" class="banner" hidden></div>
+
+    <div class="card">
+      <p class="sub" style="margin:0">你要付</p>
+      <p class="price" id="pay"></p>
+      <p class="sub" id="pay-detail" style="margin:4px 0 0"></p>
+    </div>
+
+    <div class="card">
+      <h2>这一单怎么保障你</h2>
+      <dl class="kv">
+        <dt>卖家押金</dt><dd id="sb"></dd>
+        <dt>发货期限</dt><dd id="dw"></dd>
+        <dt>验收期限</dt><dd id="iw"></dd>
+        <dt>剩余库存</dt><dd id="stock"></dd>
+        <dt>卖家</dt><dd class="mono" id="seller"></dd>
+      </dl>
+      <p class="sub" style="margin:10px 0 0" id="guarantee"></p>
+    </div>
+
+    <div class="card">
+      <h2>商品条款（链上原文）</h2>
+      <pre class="terms" id="terms"></pre>
+      <p class="sub" style="margin:8px 0 0">条款原文存在链上，下单即表示同意这一份。吵架时仲裁只看它。</p>
+    </div>
+
+    <div class="card">
+      <h2>下单要做的事</h2>
+      <ol class="steps">
+        <li id="s1"><h4>连接钱包</h4><p>用你付钱的那个钱包</p></li>
+        <li id="s2"><h4>设置取货钥匙（钱包里签名 2 次）</h4><p>卖家会用它给卡密加密，只有你能解开。签两次是为了确认你的钱包每次签出来都一样，不花钱</p></li>
+        <li id="s3"><h4>授权（钱包里确认 1 次）</h4><p>允许下单合约划走这一单的钱。只授权这一单的金额</p></li>
+        <li id="s4"><h4>下单（钱包里确认 1 次）</h4><p>钱锁进这一单自己的合约，交易立刻生效</p></li>
+      </ol>
+    </div>
+
+    <p id="status"></p>
+    <button id="go">开始下单</button>
+
+    <div id="done" class="card" hidden>
+      <h2>✅ 下单成功</h2>
+      <p class="sub" style="margin:0 0 10px">卖家发货后，打开下面的取货页，签一次名就能看到卡密。<b>把这个链接存好。</b></p>
+      <a id="pickup" class="btn ok" target="_blank" rel="noopener">打开取货页</a>
+      <a id="tg" class="btn ghost" target="_blank" rel="noopener" hidden>想收发货通知？去 Telegram 绑定钱包</a>
+      <p class="sub mono" id="deal" style="margin:0"></p>
+    </div>
+  </div>
+</main>
+<script src="vendor/ethers.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="pickup.js"></script>
+<script src="shop.js"></script>
+<script src="buy.js"></script>
+</body>
+</html>

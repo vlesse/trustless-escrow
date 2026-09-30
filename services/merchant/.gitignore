@@ -1,0 +1,8 @@
+# 卡密是卖家的货，绝不能进仓库
+codes/
+*.txt
+# 状态文件里有每一单分到的卡密原文
+.merchant-state.json
+.merchant-state.json.tmp
+.env
+node_modules/

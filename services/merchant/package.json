@@ -1,0 +1,15 @@
+{
+  "name": "@trustless-escrow/merchant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "卖家自己运行的自动发货程序：加密卡密写上链、同步库存、补押金",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test test/logic.test.js"
+  },
+  "dependencies": {
+    "ethers": "^6.13.4"
+  }
+}
