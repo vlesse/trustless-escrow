@@ -178,6 +178,15 @@ describe("操作可用性（合约状态机的镜像）", () => {
     assert.ok(!ids(d, "seller", d.deliveryDeadline).includes("delivered"));
   });
 
+  /*
+   * 交付期过后合约不再接受「标记已交付」。原来按钮照给，卖家点下去签名，
+   * 只会得到一次失败 —— 还白付一次 gas。
+   */
+  test("交付期过后：卖家不再有「标记已交付」", () => {
+    const d = { ...base, state: State.Funded, buyerFunded: true, sellerFunded: true };
+    assert.ok(!ids(d, "seller", d.deliveryDeadline).includes("delivered"));
+  });
+
   test("交付期过后：买家可索赔，卖家可提争议对抗", () => {
     const d = { ...base, state: State.Funded, buyerFunded: true, sellerFunded: true };
     const after = d.deliveryDeadline + 1;
