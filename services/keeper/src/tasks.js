@@ -45,10 +45,18 @@ export function juryTask(c, { now, blockNumber }) {
 }
 
 /// 乐观层争议当下该推的那一步。
-export function optimisticTask(d, { now }) {
+export function optimisticTask(d, { now, arbitrableStillDisputed = true }) {
   if (d.status === Status.None || d.status === Status.Executed) return null;
 
   if (d.status === Status.Open && now > d.createdAt + PROPOSAL_WINDOW) {
+    /*
+     * 交易已经结束（认输 / 和解 / 失联兜底）就不要再升级。
+     *
+     * 升级等于把一个已经没有意义的案子交给陪审团：抽人、锁质押、投三天票、
+     * 公开两天、等两天上诉期 —— 陪审员白干一周，最后回调托管合约还会失败。
+     * 这个案子不升级也不会锁住任何钱：Open 状态下没有人押过保证金。
+     */
+    if (!arbitrableStillDisputed) return null;
     return { method: "escalateUnproposed", args: [d.id], why: "AI 超时未提案，直接升级" };
   }
   if (d.status === Status.Proposed && now > d.proposedAt + CHALLENGE_WINDOW) {

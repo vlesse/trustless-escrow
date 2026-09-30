@@ -92,6 +92,13 @@ contract Reputation {
     /// @notice 已记录的交易，保证幂等。
     mapping(address => bool) public recorded;
 
+    /// @notice 双方协商和解结束的笔数。
+    /// @dev 单独一个计数，不塞进 Record：Record 的形状已经被前端按字段读死了，
+    ///      加一个字段会让所有读它的地方一起错位。
+    ///      也不算进 disputesInconclusive —— 和解可能发生在根本没起争议的时候
+    ///      （比如货有瑕疵，谈好退一部分），把它记成「争议」是在冤枉人。
+    mapping(address => uint32) public settledByAgreementOf;
+
     event Recorded(
         address indexed deal, address indexed buyer, address indexed seller, Escrow.Outcome outcome, uint256 price
     );
@@ -157,6 +164,11 @@ contract Reputation {
             rb.disputesLost += 1;
             // 卖家胜诉这条路径是真的结算了的：货款照付、手续费照收。
             _credit(buyer, seller, token, price, e.feeBps());
+        } else if (o == Escrow.Outcome.Agreed) {
+            // 协商一致：不认定过错，也不记成交额（分法是双方私下定的，
+            // 货款到底付了多少不是一个干净的数）。
+            settledByAgreementOf[buyer] += 1;
+            settledByAgreementOf[seller] += 1;
         } else {
             // DisputeSplit（拒裁）与 DisputeStale（仲裁方失联超时）。
             // 两者都没有认定过错方，不能算在任何一方头上。

@@ -100,10 +100,16 @@ export async function readDispute(optimistic, id) {
   const d = await optimistic.disputes(id);
   return {
     id,
+    arbitrable: d.arbitrable,
     status: Number(d.status),
     createdAt: Number(d.createdAt),
     proposedAt: Number(d.proposedAt),
   };
+}
+
+/// 只读交易状态。keeper 决定要不要把一个没人提案的争议升级时用。
+export async function readDealState(provider, address) {
+  return Number(await new ethers.Contract(address, ESCROW_ABI, provider).state());
 }
 
 export async function readDeal(provider, address, reputation) {

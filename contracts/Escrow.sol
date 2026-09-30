@@ -72,7 +72,11 @@ contract Escrow is IEscrowArbitrable {
         DisputeBuyer,       // 争议：买家胜（卖家保证金被罚没）
         DisputeSeller,      // 争议：卖家胜（买家保证金被罚没）
         DisputeSplit,       // 争议：拒裁，中性拆分 —— 未认定任何一方有过错
-        DisputeStale        // 争议：仲裁方失联超时 —— 过错在仲裁层，不在双方
+        DisputeStale,       // 争议：仲裁方失联超时 —— 过错在仲裁层，不在双方
+        Agreed              // 双方协商一致，按约定的分法结算 —— 不认定过错
+        // 注意：一方「认输」不单列，记为 DisputeBuyer / DisputeSeller。
+        // 认输就是承认自己错了，和被判输是同一个事实，不能让它比被判输更体面，
+        // 否则「眼看要输就抢先认输」会成为洗白败诉记录的办法。
     }
 
     // ------------------------------------------------------------ 交易条款
@@ -126,6 +130,12 @@ contract Escrow is IEscrowArbitrable {
     uint256 public disputeID;
     bool private _entered;
 
+    /// @notice 当前挂着的和解提议：谁提的，以及提议里买家拿多少（其余归卖家）。
+    /// @dev 只存一份。任一方再提一次就覆盖；对方只能接受「此刻挂着的这一份」，
+    ///      而且接受时必须把金额原样带上 —— 见 acceptSettlement。
+    address public offerBy;
+    uint256 public offerToBuyer;
+
     // ---------------------------------------------------------------- 事件
 
     event Initialized(
@@ -146,6 +156,9 @@ contract Escrow is IEscrowArbitrable {
     event Evidence(address indexed by, string evidenceURI);
     event Ruled(uint256 indexed disputeID, uint256 ruling);
     event Settled(State finalState, uint256 toBuyer, uint256 toSeller, uint256 toArbitrator, uint256 fee);
+    event Conceded(address indexed by);
+    event SettlementOffered(address indexed by, uint256 toBuyer);
+    event SettlementOfferCleared(address indexed by);
 
     // ---------------------------------------------------------------- 错误
 
@@ -162,6 +175,8 @@ contract Escrow is IEscrowArbitrable {
     error Reentrancy();
     error AlreadyFunded();
     error UnknownDispute();
+    error NoMatchingOffer();
+    error AmountTooLarge();
 
     // -------------------------------------------------------------- 修饰符
 
@@ -333,6 +348,9 @@ contract Escrow is IEscrowArbitrable {
 
         state = State.Disputed;
         disputeRaisedAt = uint64(block.timestamp);
+        // 争议一开，可分配的钱就少了一份仲裁费。争议前谈的分法是按「不付仲裁费」
+        // 算的，原样留着会让接受的一方拿到一个对方从没同意过的数字。作废，重谈。
+        _clearOffer();
         disputeID = IEscrowArbitrator(arbitrator).createDispute(2, "");
         emit DisputeRaised(msg.sender, disputeID, evidenceURI);
     }
@@ -351,7 +369,86 @@ contract Escrow is IEscrowArbitrable {
         if (_disputeID != disputeID) revert UnknownDispute();
 
         emit Ruled(_disputeID, _ruling);
+        _applyRuling(_ruling);
+    }
 
+    // ------------------------------------------------------------ 认输与和解
+    //
+    // 仲裁最快两天，走到陪审团至少一周。钱在这段时间里谁都动不了 —— 对大额交易，
+    // 这比仲裁结果本身还伤人。而现实里大多数纠纷最后是谈出来的，或者一方自知理亏。
+    // 原来的合约里这两条路都不存在：双方就算已经谈妥，也只能干等仲裁走完。
+    //
+    // 两条出口都**照付仲裁费**（争议中的话）。托管合约不知道仲裁层已经做了多少事，
+    // 而仲裁层一旦受理就会把流程走完（陪审员照样投票、照样要拿报酬）。
+    // 仲裁层回调 rule() 时这里已是终态，会 revert —— 乐观层、Kleros 适配器都已经
+    // 用 try/catch 接住，押金照常按裁决结算，不会有任何一方的钱被锁死。
+    // 省下的是时间，不是仲裁费。要不付仲裁费，就在起争议之前谈好。
+
+    /// @notice 认输：按对方胜诉结算，与被仲裁判输完全相同。
+    /// @dev 只会损害调用者自己，所以不需要任何对方同意、也不需要等待。
+    function concede() external nonReentrant {
+        if (state != State.Disputed) revert BadState();
+        if (msg.sender != buyer && msg.sender != seller) revert NotParty();
+        emit Conceded(msg.sender);
+        _applyRuling(msg.sender == buyer ? RULING_SELLER : RULING_BUYER);
+    }
+
+    /// @notice 提出一个和解分法：买家拿 toBuyer，其余归卖家（卖家那份按比例扣手续费）。
+    /// @dev 交付前、验收中、争议中都可以谈。再提一次会覆盖上一份。
+    function offerSettlement(uint256 toBuyer) external {
+        if (state != State.Funded && state != State.Delivered && state != State.Disputed) revert BadState();
+        if (msg.sender != buyer && msg.sender != seller) revert NotParty();
+        if (toBuyer > _distributable()) revert AmountTooLarge();
+        offerBy = msg.sender;
+        offerToBuyer = toBuyer;
+        emit SettlementOffered(msg.sender, toBuyer);
+    }
+
+    /// @notice 撤回自己挂着的提议。
+    function cancelSettlementOffer() external {
+        if (offerBy == address(0) || msg.sender != offerBy) revert NotParty();
+        _clearOffer();
+    }
+
+    /// @notice 接受对方的提议，立即结算。
+    /// @param toBuyer 必须与对方挂着的那份**一字不差**。
+    /// @dev 让接受方把金额原样带上，是为了防一种抢跑：提议方看到接受交易进了内存池，
+    ///      抢先把提议改成对自己更有利的数字。带上金额之后，改过的提议对不上，
+    ///      接受交易直接失败 —— 签名的人签下的永远是他看到的那个数。
+    function acceptSettlement(uint256 toBuyer) external nonReentrant {
+        if (state != State.Funded && state != State.Delivered && state != State.Disputed) revert BadState();
+        if (msg.sender != buyer && msg.sender != seller) revert NotParty();
+        address by = offerBy;
+        if (by == address(0) || by == msg.sender || toBuyer != offerToBuyer) revert NoMatchingOffer();
+
+        uint256 pool = _distributable();
+        uint256 cost = state == State.Disputed ? lockedArbCost : 0;
+        uint256 toSellerGross = pool - toBuyer;
+        uint256 fee_ = _agreedFee(toSellerGross);
+
+        offerBy = address(0);
+        offerToBuyer = 0;
+        state = State.Resolved;
+        outcome = Outcome.Agreed;
+        _payout(toBuyer, toSellerGross - fee_, cost, fee_);
+    }
+
+    /// @notice 仲裁方失联保护。争议提起满 DISPUTE_TIMEOUT 仍无裁决，
+    ///         任何人可触发中性拆分，且不向失职的仲裁方支付任何成本。
+    ///         资金不会因为仲裁层故障而永久锁死。
+    function resolveStaleDispute() external nonReentrant {
+        if (state != State.Disputed) revert BadState();
+        if (block.timestamp < uint256(disputeRaisedAt) + DISPUTE_TIMEOUT) revert TooEarly();
+        state = State.Resolved;
+        outcome = Outcome.DisputeStale;
+        _payout(price + buyerBond, sellerBond, 0, 0);
+    }
+
+    // ---------------------------------------------------------------- 内部
+
+    /// @dev 一次裁决（或认输）的资金分配。认输与被判输走的是同一段代码 ——
+    ///      两条路径算出来的钱只要有一个 wei 不同，就会有人专挑划算的那条走。
+    function _applyRuling(uint256 _ruling) private {
         uint256 cost = lockedArbCost;
         uint256 fee_ = (price * feeBps) / 10_000;
 
@@ -374,18 +471,32 @@ contract Escrow is IEscrowArbitrable {
         }
     }
 
-    /// @notice 仲裁方失联保护。争议提起满 DISPUTE_TIMEOUT 仍无裁决，
-    ///         任何人可触发中性拆分，且不向失职的仲裁方支付任何成本。
-    ///         资金不会因为仲裁层故障而永久锁死。
-    function resolveStaleDispute() external nonReentrant {
-        if (state != State.Disputed) revert BadState();
-        if (block.timestamp < uint256(disputeRaisedAt) + DISPUTE_TIMEOUT) revert TooEarly();
-        state = State.Resolved;
-        outcome = Outcome.DisputeStale;
-        _payout(price + buyerBond, sellerBond, 0, 0);
+    /// @dev 和解时双方能分的总额。争议中要先留出仲裁费。
+    function _distributable() private view returns (uint256) {
+        uint256 total = price + buyerBond + sellerBond;
+        return state == State.Disputed ? total - lockedArbCost : total;
     }
 
-    // ---------------------------------------------------------------- 内部
+    /// @dev 和解的手续费：只对卖家「押金以外、实际从买家那里拿到的钱」收，最多收到货款那么多。
+    ///
+    ///      口径与整个协议一致：手续费当且仅当卖家真的拿到货款时产生，而且按拿到多少算。
+    ///      - 卖家只拿回自己的押金（等于全额退款）→ 不收
+    ///      - 卖家拿到全部货款 → 与正常成交收得一样多
+    ///      不能干脆不收：大额交易的 1% 可能远高于仲裁费，那样「先起争议再和解」
+    ///      就成了逃手续费的办法。也不能多收：平台不能从纠纷里比正常成交赚得更多。
+    function _agreedFee(uint256 toSellerGross) private view returns (uint256) {
+        uint256 gain = toSellerGross > sellerBond ? toSellerGross - sellerBond : 0;
+        if (gain > price) gain = price;
+        return (gain * feeBps) / 10_000;
+    }
+
+    function _clearOffer() private {
+        address by = offerBy;
+        if (by == address(0)) return;
+        offerBy = address(0);
+        offerToBuyer = 0;
+        emit SettlementOfferCleared(by);
+    }
 
     function _settleToSeller() private {
         uint256 fee_ = (price * feeBps) / 10_000;
@@ -397,6 +508,9 @@ contract Escrow is IEscrowArbitrable {
     /// @dev 唯一的出金函数。状态已在调用前置为终态，转账在最后发生
     ///      （checks-effects-interactions），叠加 nonReentrant 双重保险。
     function _payout(uint256 toBuyer, uint256 toSeller, uint256 toArbitrator, uint256 fee_) private {
+        // 所有终态都从这里出去，所以在这里清掉没用上的和解提议 ——
+        // 交易都结束了还挂着一份「待接受」，前端会把它当真。
+        _clearOffer();
         address t = token;
         if (toBuyer > 0) t.safeTransfer(buyer, toBuyer);
         if (toSeller > 0) t.safeTransfer(seller, toSeller);

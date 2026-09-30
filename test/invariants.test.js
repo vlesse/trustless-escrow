@@ -132,10 +132,13 @@ describe("不变量（随机动作序列）", function () {
       //    而且那句话还标着「有测试覆盖」，实际上并没有这个测试。
       //
       //    收费的只有两种终局：Completed(3) 与 DisputeSeller(5)。
+      //    和解（Agreed = 8）按卖家实际从买家那里拿到的货款比例收，
+      //    应收数额在 agree() 里独立算好了。
       const outcome = await e.outcome();
       if (st === State.Resolved || st === State.Cancelled) {
         const chargeable = outcome === 3n || outcome === 5n;
-        const expectedFee = chargeable ? (d.price * FEE_BPS) / 10000n : 0n;
+        const expectedFee = outcome === 8n ? d.agreedFee
+          : chargeable ? (d.price * FEE_BPS) / 10000n : 0n;
         expect(d.feeSeen).to.equal(
           expectedFee,
           at(`${d.address} 终局 ${outcome} 的手续费应为 ${expectedFee}`)
@@ -193,11 +196,16 @@ describe("不变量（随机动作序列）", function () {
       if (!(await e.sellerFunded())) acts.push("depositSeller", "fundViaPool");
       acts.push("cancel");
     } else if (st === State.Funded) {
-      acts.push("markDelivered");
-      if (now >= Number(await e.deliveryDeadline())) acts.push("claimNonDelivery", "sellerDispute");
+      acts.push("agree");
+      // 交付期过后不能再标记交付（防卖家抢跑买家的退款交易）。这条守卫原来没写，
+      // 20 条路径一直没抽到这个组合；路径加到 60 条才撞上 —— 测试比合约晚了一版。
+      if (now < Number(await e.deliveryDeadline())) acts.push("markDelivered");
+      else acts.push("claimNonDelivery", "sellerDispute");
     } else if (st === State.Delivered) {
-      if (now < Number(await e.inspectionDeadline())) acts.push("confirmReceipt", "buyerDispute");
-      else acts.push("settleAfterInspection");
+      acts.push("agree");
+      if (now < Number(await e.inspectionDeadline())) {
+        acts.push("confirmReceipt", "buyerDispute", "buyerDisputeConcede", "buyerDisputeAgree");
+      } else acts.push("settleAfterInspection");
     }
     return acts;
   }
@@ -236,6 +244,25 @@ describe("不变量（随机动作序列）", function () {
       await time.increase(APPEAL_WINDOW + 1);
       await jury.finalize(id);
     }
+  }
+
+  /// 随机一方提议、另一方接受。应收手续费在这里**用另一种写法独立算一遍**，
+  /// 不照抄合约里的公式 —— 照抄的话，公式错了两边一起错，测试照样绿。
+  async function agree(d, rand) {
+    const e = d.contract;
+    const disputed = (await e.state()) === State.Disputed;
+    const pool = d.price + d.buyerBond + d.sellerBond - (disputed ? ARB_COST : 0n);
+    const toBuyer = (pool * BigInt(Math.floor(rand() * 1001))) / 1000n;   // 0% ~ 100%
+    const [from, to] = rand() < 0.5 ? [d.buyer, d.seller] : [d.seller, d.buyer];
+    await e.connect(from).offerSettlement(toBuyer);
+    await e.connect(to).acceptSettlement(toBuyer);
+
+    // 卖家从买家那里实际拿到的钱 = 他那份减去他自己押进来的押金；按货款封顶
+    const sellerShare = pool - toBuyer;
+    let paidByBuyer = sellerShare - d.sellerBond;
+    if (paidByBuyer < 0n) paidByBuyer = 0n;
+    if (paidByBuyer > d.price) paidByBuyer = d.price;
+    d.agreedFee = (paidByBuyer * FEE_BPS) / 10000n;
   }
 
   async function step(d, act, rand) {
@@ -278,6 +305,22 @@ describe("不变量（随机动作序列）", function () {
         return;
       case "sellerDispute":
         await e.connect(d.seller).raiseDispute("ipfs://e");
+        await resolveDispute(d, rand);
+        return;
+      case "agree":
+        await agree(d, rand);
+        return;
+      // 起争议后一方认输 / 双方和解，然后**陪审团照常走完**。
+      // 交易这时已经结束，陪审团最后回调会失败 —— 要看的就是它有没有把
+      // 陪审员的质押、报酬处理干净（不变量 5~7 每一步都在盯）。
+      case "buyerDisputeConcede":
+        await e.connect(d.buyer).raiseDispute("ipfs://e");
+        await e.connect(rand() < 0.5 ? d.buyer : d.seller).concede();
+        await resolveDispute(d, rand);
+        return;
+      case "buyerDisputeAgree":
+        await e.connect(d.buyer).raiseDispute("ipfs://e");
+        await agree(d, rand);
         await resolveDispute(d, rand);
         return;
       default:
@@ -329,10 +372,35 @@ describe("不变量（随机动作序列）", function () {
     return d;
   }
 
-  it("随机走 20 条路径，每一步之后八条不变量全部成立", async function () {
+  // 60 条：加了认输/和解三种动作之后，20 条路径里「争议中和解」只被抽到过 1 次 ——
+  // 通过的意思是「没跑到」还是「跑到了没问题」，分不清。
+  it("随机走 60 条路径，每一步之后八条不变量全部成立", async function () {
+    await deployAll();
+    for (let k = 0; k < 60; k++) {
+      await scenario(0x5eed0000 + k * 7919);
+    }
+  });
+
+  /*
+   * 争议中途认输 / 和解，是最容易出事的组合：交易已经结束，陪审团还要把流程
+   * 走完，最后回调托管合约会失败。随机序列里这条路径很难被抽到（60 条里只有
+   * 一两次），所以这里每条都强制走到争议，再随机认输或随机金额和解。
+   */
+  it("争议中认输或和解：20 条随机路径，陪审团照常走完，不变量全部成立", async function () {
     await deployAll();
     for (let k = 0; k < 20; k++) {
-      await scenario(0x5eed0000 + k * 7919);
+      const rand = rng(0xc0de0000 + k * 104729);
+      const buyer = parties[k % parties.length];
+      const seller = parties[(k + 1) % parties.length];
+      const d = await createDeal(buyer, seller, U(100 + Math.floor(rand() * 900)), U(100 + Math.floor(rand() * 900)));
+      const deals = [d];
+      const total = await totalSupplyHeld(deals);
+      for (const act of ["depositBuyer", "depositSeller", "markDelivered",
+                         rand() < 0.5 ? "buyerDisputeConcede" : "buyerDisputeAgree"]) {
+        await doStep(d, act, rand);
+        await checkInvariants(deals, total, `争议出口 #${k}（${act}）`);
+      }
+      expect(await d.contract.state()).to.equal(State.Resolved);
     }
   });
 

@@ -80,7 +80,14 @@ async function collectOptimistic(clients, ctx) {
   const next = Number(await clients.optimistic.nextDisputeID());
   for (let id = 1; id < next; id++) {
     const d = await chain.readDispute(clients.optimistic, id);
-    const t = tasks.optimisticTask(d, ctx);
+    let t = tasks.optimisticTask(d, ctx);
+    // 只在「要升级」时才多读一次交易状态：大多数案子走不到这里，不值得每轮都读
+    if (t?.method === "escalateUnproposed") {
+      const st = await chain.readDealState(clients.provider, d.arbitrable).catch(() => null);
+      // 读不到就当它还在争议中、照常升级：多让陪审团白干一次，好过把一个
+      // 真正需要裁决的案子晾到 45 天兜底
+      t = tasks.optimisticTask(d, { ...ctx, arbitrableStillDisputed: st === null || st === tasks.State.Disputed });
+    }
     if (t) out.push({ contract: clients.optimistic, key: `opt:${id}:${t.method}`, task: t });
   }
   return out;

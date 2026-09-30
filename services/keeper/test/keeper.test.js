@@ -76,6 +76,20 @@ describe("乐观层：该推哪一步", () => {
     assert.equal(t.optimisticTask(late, ctx()).method, "escalateUnproposed");
   });
 
+  /*
+   * 双方已经认输/和解，交易结束了。这时再升级，等于把一个没有意义的案子
+   * 交给陪审团：抽人、锁质押、白干一周，最后回调还会失败。
+   */
+  test("交易已经提前结束 → 不升级", () => {
+    const late = { ...base, createdAt: NOW - t.PROPOSAL_WINDOW - 1 };
+    assert.equal(t.optimisticTask(late, { ...ctx(), arbitrableStillDisputed: false }), null);
+  });
+
+  test("但提案人的押金一定要退：已提案的照常执行，不管交易是否已结束", () => {
+    const d = { ...base, status: S.Proposed, proposedAt: NOW - t.CHALLENGE_WINDOW - 1 };
+    assert.equal(t.optimisticTask(d, { ...ctx(), arbitrableStillDisputed: false }).method, "execute");
+  });
+
   test("提案窗口内 → 等着", () => {
     assert.equal(t.optimisticTask(base, ctx()), null);
   });
