@@ -51,6 +51,8 @@ export const MERCHANT_BOND_ABI = [
   "function deposit(uint256 amount)",
   "function withdraw(uint256 amount)",
   "function fundDeal(address deal)",
+  "function list(uint256 price, uint256 buyerBond, uint256 sellerBond, uint64 deliveryWindow, uint64 inspectionWindow, string terms, uint32 stock)",
+  "function updateListing(uint256 id, bool active, uint32 stock)",
 ];
 
 /// 仲裁层上当事人能做的两件事：不同意 AI 裁决就挑战，不同意陪审团结果就上诉。

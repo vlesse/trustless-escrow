@@ -73,7 +73,10 @@ const MERCHANT_BOND_ABI = [
   "function deposit(uint256 amount)",
   "function withdraw(uint256 amount)",
   "function fundDeal(address deal)",
+  "function list(uint256 price, uint256 buyerBond, uint256 sellerBond, uint64 deliveryWindow, uint64 inspectionWindow, string terms, uint32 stock)",
+  "function updateListing(uint256 id, bool active, uint32 stock)",
 ];
+const STORE_READ_ABI = ["function token() view returns (address)"];
 const DEAL_READ_ABI = [
   "function token() view returns (address)",
   "function price() view returns (uint256)",
@@ -101,6 +104,16 @@ const ifaces = {
 /// irreversible 的那几个必须说清楚「不可撤销」—— 这是用户最需要
 /// 在点下去之前知道的一件事。
 const ACTIONS = {
+  list: {
+    title: "上架商品",
+    risk: "medium",
+    note: "价格、押金、条款写上链后不能再改，只能下架再重新上架。请逐项核对下面的内容。",
+  },
+  updateListing: {
+    title: "上架 / 下架商品",
+    risk: "low",
+    note: "只切换在售状态和库存。已经下的单不受影响。",
+  },
   concede: {
     title: "认输",
     risk: "irreversible",
@@ -521,6 +534,24 @@ function showEvidence(uri) {
  */
 const SPLIT_METHODS = ["offerSettlement", "acceptSettlement", "concede"];
 
+/// 上架：把要写上链的每一项摆出来。写上去就不能改了。
+async function showListing(decoded, chain) {
+  const [price, bb, sb, dw, iw, terms, stock] = decoded.args;
+  let f = (x) => String(x);
+  try {
+    const rpc = new ethers.JsonRpcProvider(chain.rpcUrl);
+    const tokenAddr = await new ethers.Contract(state.tx.to, STORE_READ_ABI, rpc).token();
+    const t = new ethers.Contract(tokenAddr, ERC20_ABI, rpc);
+    const [dec, sym] = await Promise.all([t.decimals(), t.symbol()]);
+    f = (x) => `${ethers.formatUnits(x, dec)} ${sym}`;
+  } catch { /* 读不到币种就显示原始数字 */ }
+  $("split-label").textContent = "要写上链的商品（上架后不能改）：";
+  $("split-body").textContent =
+    `价格：${f(price)}\n买家押金：${f(bb)}\n你的押金（每单）：${f(sb)}\n` +
+    `发货期限：${Number(dw) / 3600} 小时\n验收期限：${Number(iw) / 3600} 小时\n库存：${stock}\n\n条款：\n${terms}`;
+  $("split-box").hidden = false;
+}
+
 async function showSplit(decoded, chain) {
   const box = $("split-box");
   const body = $("split-body");
@@ -652,6 +683,7 @@ function render() {
   $("action-note").textContent = action?.note ?? "本页面无法解读这笔交易的含义。请勿签名。";
   if (EVIDENCE_METHODS.includes(state.decoded?.name)) showEvidence(String(state.decoded.args[0] ?? ""));
   if (SPLIT_METHODS.includes(state.decoded?.name)) showSplit(state.decoded, state.chain);
+  if (state.decoded?.kind === "merchantBond" && state.decoded.name === "list") showListing(state.decoded, state.chain);
   $("action-card").className = "card " + riskClass(action?.risk ?? "high");
 
   if (action?.risk === "irreversible") {

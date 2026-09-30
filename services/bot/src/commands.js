@@ -21,6 +21,7 @@ import {
 import * as gate from "./groupgate.js";
 import * as quota from "./quota.js";
 import * as quotacmd from "./quotacommands.js";
+import * as shopcmd from "./shopcommands.js";
 import {
   parseEvidenceInput, canAdd, planSubmission, buildBundle, summarizeItems, REJECT_TEXT, EVIDENCE_HOWTO,
 } from "./evidence.js";
@@ -1163,6 +1164,7 @@ export async function handleFlowInput(chatId, userId, text, opts = {}) {
     case "new": return handleNewInput(chatId, userId, text);
     case "evidence": return handleEvidenceInput(chatId, userId, text, opts);
     case "offer": return handleOfferInput(chatId, userId, text);
+    case "list": return shopcmd.handleListInput(chatId, userId, text);
     default: return false;
   }
 }

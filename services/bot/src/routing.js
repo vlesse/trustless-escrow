@@ -23,7 +23,7 @@
  */
 export const PRIVATE_ONLY = new Set([
   "/bind", "/whoami", "/new", "/deals",
-  "/bond", "/unbond", "/record", "/quota", "/unquota",
+  "/bond", "/unbond", "/record", "/quota", "/unquota", "/shop",
 ]);
 
 /**

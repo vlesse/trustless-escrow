@@ -8,6 +8,8 @@ import * as quotacmd from "./quotacommands.js";
 import { start as startWatcher } from "./watcher.js";
 import { route, mentionedBot } from "./routing.js";
 import * as gate from "./groupgate.js";
+import * as shop from "./shop.js";
+import * as shopcmd from "./shopcommands.js";
 
 /// 日志只打用户 ID 和命令名。**永远不打消息内容** ——
 /// 用户可能在任意一条消息里粘贴私钥或助记词。
@@ -108,7 +110,13 @@ async function onMessage(msg) {
   log(`user=${userId} cmd=${command} private=${isPrivate}`);
 
   switch (command) {
-    case "/start": return cmd.cmdStart(chatId, userId, msg.from);
+    case "/start": {
+      // 购买深链：t.me/机器人?start=buy_12
+      const buyId = shop.parseBuyPayload(args[0]);
+      if (buyId !== null) return shopcmd.showListingForBuyer(chatId, buyId);
+      return cmd.cmdStart(chatId, userId, msg.from);
+    }
+    case "/shop": return shopcmd.cmdShop(chatId, userId);
     case "/help": return cmd.cmdHelp(chatId);
     case "/bind": return cmd.cmdBind(chatId, userId, args[0] ?? "");
     case "/whoami": return cmd.cmdWhoami(chatId, userId);
@@ -163,6 +171,10 @@ async function onCallback(q) {
   if (kind === "evsub") return cmd.submitBasket(chatId, userId, a);
   // 和解按钮：退百分之几（a = 0 / 50 / 100）
   if (kind === "offpct") return cmd.offerByPercent(chatId, userId, a);
+  // 店铺
+  if (kind === "shopnew") return shopcmd.startListing(chatId, userId);
+  if (kind === "shoptog") return shopcmd.toggleListing(chatId, userId, a);
+  if (kind === "list") return shopcmd.listingButton(chatId, userId, a, b);
   if (kind === "evclr") return cmd.clearBasket(chatId, userId, a);
 }
 
@@ -181,6 +193,7 @@ async function main() {
   await setMyCommands([
     { command: "bind", description: "绑定钱包地址" },
     { command: "new", description: "发起担保交易" },
+    { command: "shop", description: "我的店铺（卖家）" },
     { command: "deals", description: "我的交易" },
     { command: "deal", description: "查看某笔交易" },
     { command: "rep", description: "查看信誉记录" },

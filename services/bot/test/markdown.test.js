@@ -219,6 +219,21 @@ describe("真实消息的转义", () => {
     }
   });
 
+  test("店铺：商品摘要、商品卡片、加密发货推送", async () => {
+    const shop = await import("../src/shop.js");
+    const l = { seller: A, active: true, stock: 3n, sold: 1n, deliveryWindow: 3600n, inspectionWindow: 86400n,
+      price: U("100.5"), buyerBond: U("20.5"), sellerBond: U("50.5"),
+      terms: shop.cardTerms("王者荣耀 100 元点卡 (特价!)", 1) };
+    clean("listingLine", shop.listingLine(12n, l, INFO));
+    for (const [pool, active, stock] of [[U("999"), true, 3n], [0n, true, 3n], [U("999"), false, 3n], [U("999"), true, 0n]]) {
+      clean(`listingCard/${active}/${stock}`, shop.listingCard(12n, { ...l, active, stock }, INFO, pool).text);
+    }
+    const deal = { address: A, buyer: A, seller: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", state: 3, feeBps: 100 };
+    for (const m of watcher.describeEvent("DeliveryMarked", { seller: deal.seller, evidenceURI: "sealed", inspectionDeadline: 1800003600 }, deal, INFO)) {
+      clean("sealed/" + m.to, m.text);
+    }
+  });
+
   test("争议各阶段", () => {
     const B = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
     const deal = { address: A, buyer: A, seller: B, token: A, state: 4, feeBps: 100 };

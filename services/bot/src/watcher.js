@@ -3,7 +3,8 @@ import { config } from "./config.js";
 import * as session from "./session.js";
 import { makeProvider, loadDeal, listDeals, availableActions, tokenInfo, tokenAllowance, fmtAmount, State, untilText, cnTime } from "./deals.js";
 import * as juryalert from "./juryalert.js";
-import { esc, keyboard, btn } from "./telegram.js";
+import { esc, keyboard, btn, urlBtn } from "./telegram.js";
+import { pickupLink } from "./shop.js";
 import { ranges, getLogs as getLogsChunked, isPruned } from "./logs.js";
 import { describeEvidence, summarizeItems } from "./evidence.js";
 import { settlementSplit, refundOf, splitView, splitLines } from "./split.js";
@@ -204,7 +205,10 @@ function settleBreakdown(role, args, deal, info) {
 /// 返回 [{to: "buyer"|"seller", text}]。**每个事件双方都要收到** ——
 /// 做了操作的那一方需要回执，另一方需要知道轮到自己了。
 export function describeEvent(name, args, deal, info) {
-  const both = (make) => ["buyer", "seller"].map((r) => ({ to: r, text: make(r) }));
+  const both = (make) => ["buyer", "seller"].map((r) => {
+    const out = make(r);
+    return typeof out === "string" ? { to: r, text: out } : { to: r, ...out };
+  });
 
   switch (name) {
     case "Deposited": {
@@ -250,6 +254,29 @@ export function describeEvent(name, args, deal, info) {
       }));
 
     case "DeliveryMarked":
+      // 加密交付（店铺卖点卡）：卡密在合约里，只有买家能解开。给买家一个直接取货的按钮 ——
+      // 「卖家已发货」之后用户第一件想做的事就是看卡密，不能让他自己去找取货页在哪。
+      if (args.evidenceURI === "sealed") {
+        const link = pickupLink(deal.address);
+        return both((r) => ({
+          ...(r === "buyer" && link ? { buttons: [[urlBtn("🔑 取卡密", link)]] } : {}),
+          text: card({
+            icon: "📦",
+            title: r === "seller" ? "卡密已经加密发给买家了" : "卖家已发货",
+            deal,
+            lines: [esc(r === "seller"
+              ? "卡密用买家的取货钥匙加密后放进了这一单的合约，只有买家能解开。"
+              : "卡密已经加密放进这一单的合约里，只有你能解开。")],
+            youDo: r === "seller"
+              ? "等买家验收。现在什么都不用做。"
+              : "点下面的「取卡密」，签一次名就能看到。\n· 卡密能用 → 点「确认收货」，钱打给卖家\n· 有问题 → 点「提起争议」",
+            notes: r === "seller"
+              ? [`⏰ 验收截止：${when(args.inspectionDeadline)}`]
+              : [`⏰ 验收截止：${when(args.inspectionDeadline)}`,
+                 `*${esc("⚠️ 到时间你不操作，钱会自动打给卖家，不能撤回。")}*`],
+          }),
+        }));
+      }
       return both((r) => card({
         icon: "📦",
         title: r === "seller" ? "你已标记交付" : "卖家说已经交付了",
@@ -392,6 +419,9 @@ export function describeDeadline(deal, kind, remaining) {
   };
 }
 
+/// 要不要发「交易已创建，请入金」：只在交易还在等入金时发。
+export const shouldAnnounceCreated = (deal) => deal.state === State.Open;
+
 /// 开单通知。双方各自要存多少不一样，所以按角色分开说。
 export function describeCreated(deal, info) {
   return ["buyer", "seller"].map((r) => {
@@ -481,6 +511,9 @@ async function discoverDeals(notify, fromBlock, toBlock, tracked) {
     // 原来只给一条 /deal 命令，用户得先复制命令、再点按钮，多一步就多一个人卡住。
     try {
       const d = await loadDeal(deal, provider);
+      // 店铺下单是开单和双方入金一步完成的，交易一出生就已生效。
+      // 这时发「交易已创建，请入金」是错的 —— 紧跟着的「交易生效」那条会说清楚。
+      if (!shouldAnnounceCreated(d)) continue;
       const info = await tokenInfo(d.token, provider);
       for (const m of describeCreated(d, info)) {
         const full = `\n\n合约地址（发给对方核对用）：\n\`${esc(deal)}\``;
@@ -502,15 +535,16 @@ async function discoverDeals(notify, fromBlock, toBlock, tracked) {
  * 验收期这种带倒计时的通知尤其不能这样：错过截止时间的代价是钱，
  * 而多一步「回想合约地址」就够让人拖到明天。
  */
-async function pushTo(notify, deal, target, text) {
+async function pushTo(notify, deal, target, text, extraRows = []) {
   const addrs = target === "both" ? [deal.buyer, deal.seller]
     : target === "buyer" ? [deal.buyer] : [deal.seller];
 
   for (const a of addrs) {
     // 按钮按收件人的角色算 —— 同一条通知对买卖双方能做的事不一样
     const role = a.toLowerCase() === deal.buyer.toLowerCase() ? "buyer" : "seller";
-    const rows = availableActions(deal, role)
-      .map((act) => [btn(act.label, `act:${act.id}:${deal.address}`)]);
+    // 事件自带的按钮（比如「取卡密」）排在最前面：那是这条消息最要紧的一步
+    const rows = [...extraRows, ...availableActions(deal, role)
+      .map((act) => [btn(act.label, `act:${act.id}:${deal.address}`)])];
     rows.push([btn("查看这笔交易", `deal:${deal.address}`)]);
 
     for (const chatId of session.findUsersByAddress(a)) {
@@ -546,7 +580,7 @@ async function processEvents(notify, tracked, fromBlock, toBlock) {
       const deal = await loadDeal(log.address, provider);
       const info = await tokenInfo(deal.token, provider);
       for (const m of describeEvent(parsed.name, parsed.args, deal, info)) {
-        await pushTo(notify, deal, m.to, m.text);
+        await pushTo(notify, deal, m.to, m.text, m.buttons ?? []);
       }
     } catch (e) {
       console.error(`处理事件失败 ${log.transactionHash}:`, e.message);
