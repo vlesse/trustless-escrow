@@ -148,6 +148,14 @@ contract Escrow is IEscrowArbitrable {
     address public offerBy;
     uint256 public offerToBuyer;
 
+    /// @notice 加密交付的货物（比如点卡卡密），只有买家能解开。见 deliverSealed。
+    /// @dev 存在状态里而不是只写进事件：公共节点的日志只留几个小时，
+    ///      买家两天后来取货就找不到了。
+    bytes public sealedGoods;
+
+    /// @notice 加密货物的长度上限。卡密、激活码都只有几十字节；更大的东西该放文件、交链接。
+    uint256 public constant MAX_SEALED = 1024;
+
     // ---------------------------------------------------------------- 事件
 
     event Initialized(
@@ -188,6 +196,7 @@ contract Escrow is IEscrowArbitrable {
     error AlreadyFunded();
     error UnknownDispute();
     error NoMatchingOffer();
+    error SealedTooLarge();
     error AmountTooLarge();
 
     // -------------------------------------------------------------- 修饰符
@@ -309,6 +318,22 @@ contract Escrow is IEscrowArbitrable {
     // ---------------------------------------------------------------- 履约
 
     function markDelivered(string calldata evidenceURI) external {
+        _markDelivered(evidenceURI);
+    }
+
+    /// @notice 交付一份加密货物：用买家的取货公钥加密的卡密之类，存在合约里，只有买家能解。
+    ///
+    /// @dev 数字商品的交付本身就能做成链上事实：交没交、交的是哪一份，永久可查。
+    ///      卖家说「发了」、买家说「没收到」这种吵法，在这里不存在 ——
+    ///      密文就在合约里，买家解不开就说明不是用他的钥匙加密的。
+    ///      合约不管加密格式，只管存；格式和解密在 signing-page/pickup.js。
+    function deliverSealed(bytes calldata goods) external {
+        if (goods.length == 0 || goods.length > MAX_SEALED) revert SealedTooLarge();
+        _markDelivered("sealed");
+        sealedGoods = goods;
+    }
+
+    function _markDelivered(string memory evidenceURI) private {
         if (state != State.Funded) revert BadState();
         if (msg.sender != seller) revert NotParty();
         // 交付期过后只能走 raiseDispute 对抗 claimNonDelivery。

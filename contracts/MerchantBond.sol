@@ -88,6 +88,11 @@ contract MerchantBond {
     error ListingInactive();
     error SoldOut();
     error UnknownListing();
+    error BadTerms();
+    error BadPickupKey();
+
+    /// @notice 条款全文长度上限（字节）。约 1300 个汉字，写清楚商品、交付、验收足够了。
+    uint256 public constant MAX_TERMS = 4000;
 
     bool private _entered;
 
@@ -176,10 +181,25 @@ contract MerchantBond {
         uint256 buyerBond;
         uint256 sellerBond;
         bytes32 termsHash;
+        /// @dev 条款全文存在链上。买家下单前必须看得到自己同意的是什么，
+        ///      而 termsHash 由合约自己从这段文字算出来 —— 展示的和成交的保证是同一份。
+        string terms;
     }
 
     mapping(uint256 => Listing) private _listings;
     uint256 public nextListingId = 1;
+
+    /// @notice 每个卖家上架过的商品编号。按状态查，不靠会被裁剪的日志。
+    mapping(address => uint256[]) public listingsOf;
+
+    /// @notice 每一单来自哪个商品、买家的取货公钥是什么。自动发货程序靠这两样
+    ///         决定发哪种卡、用谁的钥匙加密。同样存状态，不靠日志。
+    mapping(address => uint256) public listingOf;
+    mapping(address => bytes) public pickupKeyOf;
+
+    function listingsOfLength(address seller) external view returns (uint256) {
+        return listingsOf[seller].length;
+    }
 
     function listings(uint256 id) external view returns (Listing memory) {
         return _listings[id];
@@ -192,10 +212,13 @@ contract MerchantBond {
         uint256 sellerBond,
         uint64 deliveryWindow,
         uint64 inspectionWindow,
-        bytes32 termsHash,
+        string calldata terms,
         uint32 stock
     ) external returns (uint256 id) {
+        if (bytes(terms).length == 0 || bytes(terms).length > MAX_TERMS) revert BadTerms();
+        bytes32 termsHash = keccak256(bytes(terms));
         id = nextListingId++;
+        listingsOf[msg.sender].push(id);
         Listing storage l = _listings[id];
         l.seller = msg.sender;
         l.active = true;
@@ -206,6 +229,7 @@ contract MerchantBond {
         l.buyerBond = buyerBond;
         l.sellerBond = sellerBond;
         l.termsHash = termsHash;
+        l.terms = terms;
         emit Listed(id, msg.sender, price, buyerBond, sellerBond, deliveryWindow, inspectionWindow, termsHash, stock);
     }
 
@@ -221,8 +245,12 @@ contract MerchantBond {
     }
 
     /// @notice 下单。买家需事先把「货款 + 买家押金」授权给本合约。
+    /// @param pickupKey 买家的取货公钥（33 字节压缩格式），卖家用它加密卡密。
+    ///                  实物商品不需要，传空。
     /// @return deal 这一单的托管合约，下单完成时已经生效（双方都已入金）。
-    function buy(uint256 id) external nonReentrant returns (address deal) {
+    function buy(uint256 id, bytes calldata pickupKey) external nonReentrant returns (address deal) {
+        if (pickupKey.length != 0
+            && (pickupKey.length != 33 || (pickupKey[0] != 0x02 && pickupKey[0] != 0x03))) revert BadPickupKey();
         Listing storage l = _listings[id];
         if (l.seller == address(0)) revert UnknownListing();
         if (!l.active) revert ListingInactive();
@@ -253,6 +281,9 @@ contract MerchantBond {
         token.safeTransferFrom(msg.sender, address(this), need);
         token.safeApprove(deal, need);
         IEscrowSellerSide(deal).depositBuyer();
+
+        listingOf[deal] = id;
+        if (pickupKey.length != 0) pickupKeyOf[deal] = pickupKey;
 
         emit Purchased(id, deal, msg.sender, seller);
     }

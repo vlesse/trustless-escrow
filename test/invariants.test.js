@@ -175,10 +175,10 @@ describe("不变量（随机动作序列）", function () {
   /// 在所有后续路径上都守得住同样的不变量，而且店铺账面始终等于它手里的钱。
   async function createViaStore(buyer, seller, price, bond) {
     await pool.connect(seller).deposit(bond);
-    const lrc = await (await pool.connect(seller).list(price, bond, bond, DELIVERY, INSPECTION, ethers.ZeroHash, 1)).wait();
+    const lrc = await (await pool.connect(seller).list(price, bond, bond, DELIVERY, INSPECTION, "随机商品", 1)).wait();
     const id = lrc.logs.map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((x) => x && x.name === "Listed").args.id;
-    const rc = await (await pool.connect(buyer).buy(id)).wait();
+    const rc = await (await pool.connect(buyer).buy(id, "0x")).wait();
     const address = rc.logs.map((l) => { try { return pool.interface.parseLog(l); } catch { return null; } })
       .find((x) => x && x.name === "Purchased").args.deal;
     return {
